@@ -65,7 +65,7 @@ export function historyEvents(session,kind,position=0,nextPlaybackId='',endPosit
   return [{type:'jssdk_playback_stats',message:stats},{type:'track_stream_verification',message:{...common,ms_played:position,ms_nominal_played:position,sequence_id:1,next_playback_id:nextPlaybackId,playback_service:'web_player'}}];
 }
 export class SpotifyWebPlayer {
-  constructor(session,catalog) {this.auth=session;this.catalog=catalog;this.host=session.host;this.device=null;this.current=null;this.queueCache=null;this.openPromise=null;this.commandWaiters=[];this.commands=[];this.blockedUntil=0;this.tail=Promise.resolve();this.stopped=false;this.lastSnapshot=null;}
+  constructor(session,catalog) {this.auth=session;this.catalog=catalog;this.host=session.host;this.device=null;this.current=null;this.queueCache=null;this.openPromise=null;this.commandWaiters=[];this.commands=[];this.blockedUntil=0;this.tail=Promise.resolve();this.stopped=false;this.lastSnapshot=null;this.lastSessionTime=0;}
   check(snapshot) {this.auth.check(snapshot);if(this.stopped)throw Error('PLUGIN_STOPPED');}
   enqueue(fn) {const result=this.tail.then(fn);this.tail=result.catch(error=>{if(error.message!=='ACCOUNT_CHANGED'&&error.message!=='PLUGIN_STOPPED')this.host.log('Spotify Web Player operation failed');});return result;}
   async post(path,body,snapshot,method='POST') {return this.auth.json(this.device.webgate+path,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},snapshot);}
@@ -155,8 +155,8 @@ export class SpotifyWebPlayer {
     if(typeof playback.playbackInstanceId!=='string'||!playback.playbackInstanceId.trim())return;
     const resolved=entityId(item.id)?item:await this.catalog.resolve({track:item,identity:{canonicalId:item.id,isrc:item.extras?.isrc}});this.check(snapshot);if(!resolved)return;
     const state=await this.requestState(resolved,snapshot,item.extras?.['spotify.contextUri']);this.check(snapshot);
-    const now=Date.now();this.current={trackUri:resolved.id,hostTrackId:item.id,occurrence:playback.playbackInstanceId,
-      stateMachineId:state.stateMachineId,stateId:state.stateId,playbackId:state.playbackId??randomId(),sessionId:String(now),correlationId:randomId(),startedAtMs:now,durationMs:state.durationMs||resolved.duration,
+    const now=Date.now();this.lastSessionTime=Math.max(now,this.lastSessionTime+1);this.current={trackUri:resolved.id,hostTrackId:item.id,occurrence:playback.playbackInstanceId,
+      stateMachineId:state.stateMachineId,stateId:state.stateId,playbackId:state.playbackId??randomId(),sessionId:String(this.lastSessionTime),correlationId:randomId(),startedAtMs:now,durationMs:state.durationMs||resolved.duration,
       lastPosition:Number(playback.position)||0,lastTime:now,playing:playback.playing,playedMs:0,reported:false};
     await this.reportState({position:this.current.lastPosition,previousPosition:0,paused:!playback.playing,source:'before_track_load',stats:false},snapshot);
     await this.batch(historyEvents(this.current,'start'),snapshot);
