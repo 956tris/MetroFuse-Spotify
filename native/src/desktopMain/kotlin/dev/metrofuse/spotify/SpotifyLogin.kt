@@ -37,13 +37,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
@@ -165,15 +161,7 @@ private suspend fun runSpotifyBrowser(
             val executable = File(directory, "spotify-browser.exe")
             executable.writeBytes(resources.readAsset("assets/windows/spotify-browser.exe"))
             val requestFile = File(directory, "request.json")
-            requestFile.writeText(
-                buildJsonObject {
-                    put("url", request.url)
-                    put("cookieUrl", request.cookieUrl)
-                    put("cookieField", request.cookieField)
-                    put("requiredCookies", JsonArray(request.requiredCookies.map(::JsonPrimitive)))
-                    put("allowedHosts", JsonArray(request.allowedHosts.map(::JsonPrimitive)))
-                }.toString(),
-            )
+            requestFile.writeText(spotifyBrowserRequestJson(request))
             val builder =
                 ProcessBuilder(executable.absolutePath, requestFile.absolutePath, title, File(directory, "profile").absolutePath)
                     .redirectError(ProcessBuilder.Redirect.DISCARD)
@@ -221,3 +209,5 @@ private suspend fun runSpotifyBrowser(
             }
         }
     }
+
+internal fun spotifyBrowserRequestJson(request: WebLoginRequest): String = Json.encodeToString(request)

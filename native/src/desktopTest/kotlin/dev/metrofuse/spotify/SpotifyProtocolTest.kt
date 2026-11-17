@@ -2,6 +2,7 @@ package dev.metrofuse.spotify
 
 import dev.metrofuse.api.PlaybackState
 import dev.metrofuse.api.Track
+import dev.metrofuse.api.WebLoginRequest
 import dev.metrofuse.spotify.legacy.Artist
 import dev.metrofuse.spotify.legacy.MediaMetadata
 import dev.metrofuse.spotify.legacy.SongItem
@@ -12,6 +13,15 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class SpotifyProtocolTest {
+    @Test fun browserHandoffRetainsTheSpotifyCompletionPage() {
+        val request = SpotifyPlugin().browserRequest()
+        val handedOff = Json.decodeFromString<WebLoginRequest>(spotifyBrowserRequestJson(request))
+        assertEquals(request, handedOff)
+        assertEquals("/", handedOff.completionPath)
+        assertEquals("https://open.spotify.com/", handedOff.cookieUrl)
+        assertEquals(listOf("sp_dc"), handedOff.requiredCookies)
+    }
+
     @Test fun rapidDuplicateOccurrencesHaveSeparateTransportSessionsAndPlaybackIds() = runBlocking {
         SpotifyCanvasClient.resetAccountState()
         val now = System.currentTimeMillis()

@@ -18,6 +18,8 @@ Use the patched MetroFuse **preview002** host released with this plugin. Earlier
 
 ## Build and checks
 
+Version 1.0.1 waits for Spotify to return to the Web Player before capturing the native browser session. The Windows helper receives the complete browser request, including that completion rule, so an intermediate login or identity-provider page cannot finish the capture early.
+
 Build matching host API/SDK desktop JARs first, then run from this repository (PowerShell):
 
 ```powershell
@@ -27,6 +29,7 @@ $hostCheckout = '/path/to/MetroFuse'
 node --test tests/test_spotify.mjs
 python tooling/package.py
 python tests/check_packages.py
+python tests/check_browser.py # Windows: validates the packaged login helper without opening a browser
 ```
 
 The native build uses compile-only host libraries and D8 for Android. The desktop package includes the SDK's Windows login helper; Android delegates to the host WebView. Package checks reject bundled host/runtime classes and desktop Skiko references in the Android DEX. `dist/SHA256SUMS` describes the resulting files. Backend tests cover queue duplicates, current-track matching, playback reporting transitions, account cleanup, timestamp units, login protocol and ABI descriptors. Live sign-in and live reporting have not been validated with a Spotify account.
