@@ -1,0 +1,18 @@
+{
+  "title": "Sign in to Spotify",
+  "instructions": "Sign in to Spotify in the browser. Your session is stored privately by MetroFuse and is used for your Spotify metadata and library.",
+  "error": "Spotify could not verify this session. Sign in again or retry.",
+  "retry": "Retry",
+  "cancel": "Cancel",
+  "login": "Sign in",
+  "logout": "Sign out",
+  "session": "Spotify session cookie",
+  "sessionHint": "Paste a Spotify cookie header containing sp_dc. Including sp_t enables Spotify personalization.",
+  "browserOpened": "Complete Spotify sign-in in the browser window.",
+  "browserOpening": "Opening Spotify sign-in…",
+  "browserUnavailable": "The browser could not complete sign-in. Retry or use your session cookie.",
+  "useSession": "Use session cookie",
+  "useBrowser": "Use browser",
+  "likedSongs": "Liked Songs",
+  "history": "Recently played"
+}

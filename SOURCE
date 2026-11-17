@@ -1,0 +1,9 @@
+Spotify metadata, Home, library, Canvas, lyrics, history, matching and account client ported from:
+https://github.com/956tris/MetroFuse
+Legacy checkout: MetroFuse-main-push, revision 5ba186773
+app/src/main/kotlin/com/metrolist/music/utils/spotify/SpotifyCanvasClient.kt
+app/src/main/kotlin/com/metrolist/music/utils/spotify/SpotifyListeningHistoryManager.kt
+app/src/main/kotlin/com/metrolist/music/providers/ExternalHomeFeedProviders.kt (Spotify parser only)
+GPL-3.0; original Metrolist/MetroFuse contributor notices retained.
+Android Canvas player UI is replaced by host-owned cross-platform rendering.
+Plugin packaging follows MetroFuse-Deezer; host API/SDK and shared libraries are compile-only.

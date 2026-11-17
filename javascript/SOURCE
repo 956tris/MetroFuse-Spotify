@@ -1,0 +1,20 @@
+Spotify integration ported from legacy MetroFuse (GPL-3.0).
+Source: local MetroFuse-main-push checkout, revision 5ba186773.
+app/src/main/kotlin/com/metrolist/music/utils/spotify/SpotifyCanvasClient.kt
+app/src/main/kotlin/com/metrolist/music/utils/spotify/SpotifyListeningHistoryManager.kt
+app/src/main/kotlin/com/metrolist/music/providers/ExternalHomeFeedProviders.kt
+
+JavaScript implementation uses the MetroFuse plugin SDK, no embedded browser or Node APIs.
+Features: Spotify browser/cookie login and authenticated desktop fallback, personalized
+Pathfinder Home, REST fallback shelves, search, album/artist/playlist detail, account
+library pagination, likes, matched metadata, Canvas and color lyrics. Artist metadata
+includes biography, related artists, releases, playlists, concerts and merchandise
+when present in the service response. Queue preserves Web Player order and duplicates.
+History and host upcoming-queue replacement are opt-in; account changes close sockets
+and invalidate in-flight operations. No Spotify audio decoder/DRM bypass is provided.
+
+Service endpoints and persisted GraphQL hashes can change. Home Casita fallback
+is not implemented. Library uses GraphQL first with Spotify REST fallback. Tests use
+protocol-shaped fixtures; real account authentication, queue and history require live
+validation. Exact queue is returned only from Spotify Web Player state, never a fake
+recommendation list. History reflects observed host playback, not manufactured streams.

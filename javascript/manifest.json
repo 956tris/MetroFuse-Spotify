@@ -1,0 +1,65 @@
+{
+  "id": "metrofuse.spotify",
+  "name": "Spotify (JavaScript)",
+  "version": "1.0.0",
+  "author": "MetroFuse and MetroList contributors",
+  "api": "1.1.0",
+  "runtime": "javascript",
+  "platforms": [
+    "desktop",
+    "android"
+  ],
+  "script": "index.js",
+  "capabilities": [
+    "search",
+    "catalog",
+    "metadata",
+    "lyrics",
+    "settings",
+    "login",
+    "home",
+    "network.websocket"
+  ],
+  "home": {
+    "title": "Spotify"
+  },
+  "description": "Spotify account login, personalized Home, catalog, library, metadata, artist details, Canvas, lyrics and exact Web Player queue. Optional reporting records actual MetroFuse listening in Spotify. Audio is resolved by other providers.",
+  "settings": [
+    {
+      "key": "historyEnabled",
+      "title": "Report listening history to Spotify",
+      "type": "BOOLEAN",
+      "default": false
+    },
+    {
+      "key": "queueSyncEnabled",
+      "title": "Use Spotify Web Player upcoming queue",
+      "type": "BOOLEAN",
+      "default": false
+    },
+    {
+      "key": "contentLanguage",
+      "title": "Content language tag",
+      "type": "STRING",
+      "default": ""
+    },
+    {
+      "key": "timeZone",
+      "title": "Time zone (empty uses system zone)",
+      "type": "STRING",
+      "default": ""
+    },
+    {
+      "key": "mixMetadataEnabled",
+      "title": "Spotify tempo and key",
+      "type": "BOOLEAN",
+      "default": true
+    },
+    {
+      "key": "canvasEnabled",
+      "title": "Spotify Canvas artwork",
+      "type": "BOOLEAN",
+      "default": true
+    }
+  ]
+}

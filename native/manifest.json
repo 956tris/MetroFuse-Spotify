@@ -1,0 +1,20 @@
+{
+  "id": "metrofuse.spotify",
+  "name": "Spotify",
+  "version": "1.0.0",
+  "author": "MetroFuse contributors",
+  "runtime": "kotlin",
+  "api": "1.1.0",
+  "platforms": ["desktop", "android"],
+  "entryClass": "dev.metrofuse.spotify.SpotifyPlugin",
+  "capabilities": ["search", "catalog", "metadata", "lyrics", "settings", "login", "home"],
+  "home": {"title": "Spotify"},
+  "description": "Spotify metadata, browser sign-in, personalized Home, account library, artist details, Canvas, lyrics and listening history. Audio comes from separately selected providers.",
+  "settings": [
+    {"key": "canvasEnabled", "title": "Spotify Canvas", "type": "BOOLEAN", "default": true},
+    {"key": "lyricsEnabled", "title": "Spotify lyrics", "type": "BOOLEAN", "default": true},
+    {"key": "mixMetadataEnabled", "title": "Spotify tempo and key", "type": "BOOLEAN", "default": true},
+    {"key": "historyEnabled", "title": "Sync playback to Spotify listening history", "type": "BOOLEAN", "default": false},
+    {"key": "queueSyncEnabled", "title": "Use Spotify Web Player upcoming queue", "type": "BOOLEAN", "default": false}
+  ]
+}

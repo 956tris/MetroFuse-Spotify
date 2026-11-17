@@ -1,0 +1,4 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.metrofuse.spotify">
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="37" />
+    <application android:label="Spotify plugin" android:hasCode="true" />
+</manifest>
