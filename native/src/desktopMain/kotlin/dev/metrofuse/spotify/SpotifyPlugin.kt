@@ -121,8 +121,10 @@ class SpotifyPlugin :
                     "accounts.google.com",
                     "www.google.com",
                     "appleid.apple.com",
+                    "account.apple.com",
                     "www.facebook.com",
                     "facebook.com",
+                    "m.facebook.com",
                 ),
         )
 }

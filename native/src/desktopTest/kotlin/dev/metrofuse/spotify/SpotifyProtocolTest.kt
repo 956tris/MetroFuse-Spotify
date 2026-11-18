@@ -25,6 +25,8 @@ class SpotifyProtocolTest {
         assertEquals(listOf("sp_dc"), handedOff.requiredCookies)
         assertTrue(handedOff.acceptsBrowserNavigation("https://open.spotify.com/intl-en/"))
         assertTrue(handedOff.acceptsBrowserNavigation("https://open.spotify.com/collection/tracks"))
+        assertTrue(handedOff.acceptsBrowserNavigation("https://account.apple.com/"))
+        assertTrue(handedOff.acceptsBrowserNavigation("https://m.facebook.com/login.php"))
         assertFalse(handedOff.acceptsBrowserNavigation("https://open.spotify.com.evil.example/intl-en/"))
         assertFalse(handedOff.acceptsBrowserNavigation("http://open.spotify.com/"))
         assertNull(handedOff.captureBrowserCookies(""))

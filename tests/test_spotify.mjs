@@ -85,7 +85,7 @@ test('browser login captures service cookies without requiring an exact Web Play
  assert.equal(webLogin.cookieUrl,'https://open.spotify.com/');
  assert.deepEqual(webLogin.requiredCookies,['sp_dc']);
  assert.equal(Object.hasOwn(webLogin,'completionPath'),false);
- for(const url of ['https://open.spotify.com/intl-en/','https://open.spotify.com/collection/tracks']){
+ for(const url of ['https://open.spotify.com/intl-en/','https://open.spotify.com/collection/tracks','https://account.apple.com/','https://m.facebook.com/login.php']){
   assert.equal(webLogin.allowedHosts.includes(new URL(url).hostname),true);
  }
  assert.equal(webLogin.allowedHosts.includes('open.spotify.com.evil.example'),false);
