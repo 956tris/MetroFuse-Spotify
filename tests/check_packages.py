@@ -54,9 +54,9 @@ def check_jar(path):
         classes = [name for name in names if name.endswith('.class')]
         assert classes and all(name.startswith('dev/metrofuse/spotify/') for name in classes), 'Bundled host/runtime classes'
         assert any('$$serializer.class' in name for name in classes), 'Legacy JSON serializers absent'
-        assert 'assets/windows/spotify-browser.exe' in names, 'Windows login helper absent'
+        assert not any(name.endswith('.exe') for name in names), 'Browser must be supplied by the host SDK'
         assert 'LICENSE' in names and 'SOURCE' in names
-        print(f'{path.name}: {len(classes)} plugin classes; standalone Windows login helper present.')
+        print(f'{path.name}: {len(classes)} plugin classes; uses the shared SDK browser.')
 
 
 def check_mfp(path):

@@ -16,11 +16,14 @@ import kotlin.test.*
 
 class SpotifyProtocolTest {
     @Test fun browserHandoffCapturesServiceCookiesWithoutAnExactCompletionRoute() {
-        val request = SpotifyPlugin().browserRequest()
-        val handedOff = Json.decodeFromString<WebLoginRequest>(spotifyBrowserRequestJson(request))
+        val plugin: dev.metrofuse.api.LoginPlugin = SpotifyPlugin()
+        assertTrue(plugin is dev.metrofuse.api.NativeLoginUi)
+        assertFalse(plugin is dev.metrofuse.api.WebLoginPlugin)
+        val request = (plugin as SpotifyPlugin).browserRequest()
+        val handedOff = Json.decodeFromString<WebLoginRequest>(Json.encodeToString(request))
         assertEquals(request, handedOff)
         assertNull(handedOff.completionPath)
-        assertFalse("completionPath" in Json.parseToJsonElement(spotifyBrowserRequestJson(request)).jsonObject)
+        assertFalse("completionPath" in Json.parseToJsonElement(Json.encodeToString(request)).jsonObject)
         assertEquals("https://open.spotify.com/", handedOff.cookieUrl)
         assertEquals(listOf("sp_dc"), handedOff.requiredCookies)
         assertTrue(handedOff.acceptsBrowserNavigation("https://open.spotify.com/intl-en/"))

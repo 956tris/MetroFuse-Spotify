@@ -68,24 +68,8 @@ val generatePluginManifest = tasks.register("generatePluginManifest") {
     }
 }
 
-val desktopBrowser = layout.buildDirectory.dir("plugin-browser")
-val prepareDesktopBrowser = tasks.register<Sync>("prepareDesktopBrowser") {
-    inputs.file(hostSdkJar)
-    into(desktopBrowser)
-    from({ zipTree(hostSdkJar.get()) }) {
-        include("metrofuse-sdk/windows/metrofuse-browser.exe")
-        eachFile { path = "assets/windows/spotify-browser.exe" }
-        includeEmptyDirs = false
-    }
-    doLast {
-        check(desktopBrowser.get().file("assets/windows/spotify-browser.exe").asFile.isFile) {
-            "The matching MetroFuse SDK must contain its Windows browser helper"
-        }
-    }
-}
-
 tasks.register<Jar>("packagePluginJar") {
-    dependsOn("desktopMainClasses", generatePluginManifest, prepareDesktopBrowser)
+    dependsOn("desktopMainClasses", generatePluginManifest)
     archiveFileName.set("spotify.jar")
     destinationDirectory.set(layout.buildDirectory.dir("outputs/plugins"))
     isPreserveFileTimestamps = false
@@ -95,7 +79,6 @@ tasks.register<Jar>("packagePluginJar") {
     from(rootProject.file("LICENSE"))
     from(layout.projectDirectory.file("SOURCE"))
     from(layout.projectDirectory.dir("assets")) { into("assets") }
-    from(desktopBrowser)
 }
 
 val preparedAndroid = layout.buildDirectory.dir("plugin-apk/input")

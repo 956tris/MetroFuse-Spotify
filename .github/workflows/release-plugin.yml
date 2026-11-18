@@ -1,0 +1,146 @@
+name: Build and release Spotify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spotify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Select this commit's release version
+        id: version
+        run: python3 tooling/ci-version.py
+      - name: Check out the matching MetroFuse API and SDK
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 956tris/MetroFuse
+          ref: fc1abcd2cd6fb75d3bbc857ce585d6465ef7fb08
+          path: .ci/metrofuse
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          packages: platform-tools
+      - name: Install Android packaging tools
+        run: sdkmanager "platforms;android-37.0" "platforms;android-37.1" "build-tools;37.0.0"
+      - name: Export API and SDK libraries in the isolated runner checkout
+        working-directory: .ci/metrofuse
+        run: bash ./gradlew :plugin-api:desktopJar :plugin-sdk:desktopJar --no-daemon --max-workers=2 --no-configuration-cache
+      - name: Build the Spotify extension
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bash ./gradlew :native:desktopTest :native:packagePluginJar :native:packagePluginApk \
+            "-PmetrofuseApiJar=$GITHUB_WORKSPACE/.ci/metrofuse/plugin-api/build/libs/plugin-api-desktop-1.1.0.jar" \
+            "-PmetrofuseSdkJar=$GITHUB_WORKSPACE/.ci/metrofuse/plugin-sdk/build/libs/plugin-sdk-desktop-1.1.0.jar" \
+            "-PpluginVersion=$RELEASE_VERSION" \
+            --no-daemon --max-workers=2 --no-configuration-cache
+          node --test tests/test_spotify.mjs
+          python3 tooling/package.py --version "$RELEASE_VERSION"
+          python3 tests/check_packages.py
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: spotify-tests-${{ github.sha }}
+          path: native/build/test-results/desktopTest/
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: spotify-${{ github.sha }}
+          path: |
+            dist/spotify.jar
+            dist/spotify.apk
+            dist/spotify.mfp
+            dist/SHA256SUMS
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+  release:
+    needs: build
+    if: github.repository_owner == '956tris' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: spotify-${{ github.sha }}
+          path: dist
+      - name: Verify the release packages
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          (cd dist && sha256sum --strict --check SHA256SUMS)
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from zipfile import ZipFile
+          for name, location in (
+              ('spotify.jar', 'manifest.json'),
+              ('spotify.apk', 'assets/metrofuse/manifest.json'),
+              ('spotify.mfp', 'manifest.json'),
+          ):
+              with ZipFile(Path('dist') / name) as archive:
+                  manifest = json.loads(archive.read(location))
+                  if manifest['id'] != 'metrofuse.spotify' or manifest['version'] != os.environ['RELEASE_VERSION']:
+                      raise SystemExit(f'Unexpected package: {name}')
+          PY
+      - name: Publish a release for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          tag="v$RELEASE_VERSION"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft > "$RUNNER_TEMP/spotify-release-draft"; then
+            if [[ "$(cat "$RUNNER_TEMP/spotify-release-draft")" != 'true' ]]; then
+              echo "Release $tag is already published; preserving its files."
+              exit 0
+            fi
+          else
+            cat > "$RUNNER_TEMP/spotify-release-notes.md" <<EOF
+          Import spotify.jar on desktop or spotify.apk on Android through MetroFuse Plugins.
+
+          Spotify supplies metadata, Home, library, Canvas and lyrics. Audio comes from a separately selected provider.
+
+          Uses the same SDK-owned platform browser and credential handoff as YouTube Music. The host SDK owns rendering, navigation, cookies, retry and cancellation; the plugin verifies the account before saving credentials. Apple and mobile Facebook redirects are accepted. This plugin requires a MetroFuse host containing the styled Android WebView rendering fix (fc1abcd2 or newer).
+
+          Native and JavaScript protocol, account, catalog and playback tests run before packaging. APK and JAR manifests, Android bytecode and SHA-256 checksums are checked before publication. No live device or account login was verified by this build.
+
+          Built from https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA by https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Requires MetroFuse API 1.1.0 and its matching SDK. Import the plugin through MetroFuse Plugins.
+          EOF
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "Spotify $RELEASE_VERSION" --draft --notes-file "$RUNNER_TEMP/spotify-release-notes.md"
+          fi
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" \
+            dist/spotify.jar dist/spotify.apk dist/spotify.mfp dist/SHA256SUMS --clobber
+          head=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          latest=false
+          if [[ "$head" == "$GITHUB_SHA" ]]; then latest=true; fi
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest="$latest"

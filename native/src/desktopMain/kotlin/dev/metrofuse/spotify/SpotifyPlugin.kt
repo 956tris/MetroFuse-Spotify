@@ -15,7 +15,7 @@ import kotlinx.serialization.json.*
 
 class SpotifyPlugin :
     NativePlugin,
-    WebLoginPlugin,
+    LoginPlugin,
     NativeLoginUi,
     HomePlugin {
     private val state = MutableStateFlow(PluginLoginState())
@@ -41,8 +41,6 @@ class SpotifyPlugin :
 
     override suspend fun loginRequest() =
         LoginRequest(listOf(LoginField("cookie", strings.getValue("session"))), strings.getValue("instructions"))
-
-    override suspend fun webLoginRequest() = browserRequest()
 
     override suspend fun login(credentials: LoginCredentials): PluginLoginState {
         val candidate = normalizeSpotifyCookieInput(credentials.values["cookie"].orEmpty()) ?: error("INVALID_CREDENTIALS")
@@ -89,7 +87,7 @@ class SpotifyPlugin :
         strings =
             (Json.parseToJsonElement(context.resources.readAsset("assets/strings.json").toString(Charsets.UTF_8)) as JsonObject)
                 .mapValues { it.value.jsonPrimitive.content }
-        screen = SpotifyLoginScreen(browserRequest(), strings, context.resources)
+        screen = SpotifyLoginScreen(browserRequest(), strings)
         val provider = SpotifyCatalog(this, context).also { catalog = it }
         context.registerSearchProvider(provider)
         context.registerCatalogProvider(provider)
