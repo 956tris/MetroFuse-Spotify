@@ -24,7 +24,7 @@ Back up your library and settings before migrating to the KMP Beta host. Beta bu
 
 ## Build and checks
 
-Version 1.0.1 waits for Spotify to return to the Web Player before capturing the native browser session. The Windows helper receives the complete browser request, including that completion rule, so an intermediate login or identity-provider page cannot finish the capture early.
+Version 1.0.2 captures the required Spotify service cookie without requiring an exact Web Player path, following the working YouTube Music plugin flow. Localized and alternate authenticated routes can complete login. Cookies are read only from the configured Spotify cookie origin, allowed navigation remains restricted to HTTPS, and the plugin verifies the candidate account before accepting or saving it. The Windows helper receives the same cookie-based request. Live verification of this change is pending.
 
 Build matching host API/SDK desktop JARs first, then run from this repository (PowerShell):
 

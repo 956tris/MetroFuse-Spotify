@@ -3,6 +3,8 @@ package dev.metrofuse.spotify
 import dev.metrofuse.api.PlaybackState
 import dev.metrofuse.api.Track
 import dev.metrofuse.api.WebLoginRequest
+import dev.metrofuse.sdk.acceptsBrowserNavigation
+import dev.metrofuse.sdk.captureBrowserCookies
 import dev.metrofuse.spotify.legacy.Artist
 import dev.metrofuse.spotify.legacy.MediaMetadata
 import dev.metrofuse.spotify.legacy.SongItem
@@ -13,13 +15,23 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class SpotifyProtocolTest {
-    @Test fun browserHandoffRetainsTheSpotifyCompletionPage() {
+    @Test fun browserHandoffCapturesServiceCookiesWithoutAnExactCompletionRoute() {
         val request = SpotifyPlugin().browserRequest()
         val handedOff = Json.decodeFromString<WebLoginRequest>(spotifyBrowserRequestJson(request))
         assertEquals(request, handedOff)
-        assertEquals("/", handedOff.completionPath)
+        assertNull(handedOff.completionPath)
+        assertFalse("completionPath" in Json.parseToJsonElement(spotifyBrowserRequestJson(request)).jsonObject)
         assertEquals("https://open.spotify.com/", handedOff.cookieUrl)
         assertEquals(listOf("sp_dc"), handedOff.requiredCookies)
+        assertTrue(handedOff.acceptsBrowserNavigation("https://open.spotify.com/intl-en/"))
+        assertTrue(handedOff.acceptsBrowserNavigation("https://open.spotify.com/collection/tracks"))
+        assertFalse(handedOff.acceptsBrowserNavigation("https://open.spotify.com.evil.example/intl-en/"))
+        assertFalse(handedOff.acceptsBrowserNavigation("http://open.spotify.com/"))
+        assertNull(handedOff.captureBrowserCookies(""))
+        assertNull(handedOff.captureBrowserCookies("sp_key=fixture"))
+        assertNull(handedOff.captureBrowserCookies("sp_dc="))
+        val authenticated = "sp_dc=fixture; sp_key=fixture"
+        assertEquals(mapOf("cookie" to authenticated), handedOff.captureBrowserCookies(authenticated))
     }
 
     @Test fun rapidDuplicateOccurrencesHaveSeparateTransportSessionsAndPlaybackIds() = runBlocking {

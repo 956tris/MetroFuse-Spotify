@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {utf8,text,base64,unbase64,sha1,hmacSha1,totp,protoBytes,protoString,protobuf} from '../javascript/modules/encoding.js';
-import {cookieInput,SpotifySession} from '../javascript/modules/account.js';
+import {cookieInput,SpotifySession,webLogin} from '../javascript/modules/account.js';
 import {track,album,artist,playlist,entityId,matchTrack,homeShelves,parseCanvas,usableCanvas,lyrics,SpotifyCatalog} from '../javascript/modules/catalog.js';
 import {stateMachineQueue,clusterQueue,machineTrack,dealerMessage,statePayload,historyEvents,SpotifyWebPlayer} from '../javascript/modules/webplayer.js';
 const ID='0000000000000000000001',OTHER='0000000000000000000002',URI='spotify:track:'+ID;
@@ -80,3 +80,16 @@ test('same-occurrence dealer queue change reconciles host upcoming tracks',async
 test('history waits for physical playback ID and missing-to-real transition creates one listen',async()=>{const session=ready(()=>{});session.host.settings.get=async()=>true;const player=new SpotifyWebPlayer(session,{}),seen=[];player.begin=async(item,p)=>{seen.push(['begin',p.playbackInstanceId]);player.current={hostTrackId:item.id,occurrence:p.playbackInstanceId,lastTime:Date.now(),lastPosition:p.position,playing:p.playing,durationMs:180000,playedMs:0,reported:false};};player.finish=async()=>{seen.push(['finish']);player.current=null;};player.reportState=async()=>{};const playback={track:track(raw()),playing:true,position:0,currentIndex:3};await player.observe(playback);await player.observe({...playback,playbackInstanceId:''});assert.deepEqual(seen,[]);await player.observe({...playback,playbackInstanceId:'physical'});await player.observe({...playback,playbackInstanceId:'physical',position:1000});assert.deepEqual(seen,[['begin','physical']]);await player.observe({...playback,position:2000});assert.deepEqual(seen,[['begin','physical']]);await player.observe({...playback,playing:false});assert.deepEqual(seen,[['begin','physical'],['finish']]);});
 
 test('same-millisecond playback occurrences have distinct transport session IDs',async()=>{const session=ready(()=>{}),player=new SpotifyWebPlayer(session,{}),ids=[];player.requestState=async()=>({stateMachineId:'machine',stateId:'s0',durationMs:180000});player.reportState=async()=>{};player.batch=async()=>ids.push(player.current.sessionId);const original=Date.now;try{Date.now=()=>123456;await player.begin(track(raw()),{playing:true,playbackInstanceId:'a'},session.snapshot());await player.begin(track(raw()),{playing:true,playbackInstanceId:'b'},session.snapshot());assert.deepEqual(ids,['123456','123457']);}finally{Date.now=original;}});
+
+test('browser login captures service cookies without requiring an exact Web Player route',()=>{
+ assert.equal(webLogin.cookieUrl,'https://open.spotify.com/');
+ assert.deepEqual(webLogin.requiredCookies,['sp_dc']);
+ assert.equal(Object.hasOwn(webLogin,'completionPath'),false);
+ for(const url of ['https://open.spotify.com/intl-en/','https://open.spotify.com/collection/tracks']){
+  assert.equal(webLogin.allowedHosts.includes(new URL(url).hostname),true);
+ }
+ assert.equal(webLogin.allowedHosts.includes('open.spotify.com.evil.example'),false);
+ assert.throws(()=>cookieInput('sp_key=fixture'),/INVALID_CREDENTIALS/);
+ assert.throws(()=>cookieInput('sp_dc='),/INVALID_CREDENTIALS/);
+ assert.equal(cookieInput('sp_dc=fixture; sp_key=fixture'),'sp_dc=fixture; sp_key=fixture');
+});

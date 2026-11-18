@@ -112,7 +112,6 @@ class SpotifyPlugin :
             cookieUrl = "https://open.spotify.com/",
             cookieField = "cookie",
             requiredCookies = listOf("sp_dc"),
-            completionPath = "/",
             allowedHosts =
                 listOf(
                     "accounts.spotify.com",

@@ -18,7 +18,6 @@ def check(path):
         'cookieField': 'cookie',
         'requiredCookies': ['sp_dc'],
         'allowedHosts': ['accounts.spotify.com', 'open.spotify.com'],
-        'completionPath': '/',
     }
     with tempfile.TemporaryDirectory(prefix='spotify-browser-check-') as directory:
         directory = Path(directory)
@@ -32,8 +31,8 @@ def check(path):
             [str(executable), str(config), 'Spotify login check', str(directory / 'profile'), '--validate-request'],
             capture_output=True, text=True, check=True, timeout=30, env=environment,
         )
-        assert json.loads(result.stdout) == request, 'Packaged helper lost the completion-page restriction'
-    print('Packaged Windows login helper preserves the completion origin and path.')
+        assert json.loads(result.stdout) == dict(request, completionPath=None), 'Packaged helper changed the cookie capture request'
+    print('Packaged Windows login helper accepts an omitted completion path and preserves required service cookies.')
 
 
 if __name__ == '__main__':

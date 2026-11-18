@@ -1,6 +1,6 @@
 import {totp} from './encoding.js';
 
-export const webLogin={url:'https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F',cookieUrl:'https://open.spotify.com/',cookieField:'cookie',requiredCookies:['sp_dc'],completionPath:'/',allowedHosts:['accounts.spotify.com','open.spotify.com','spotify.com','www.spotify.com','accounts.google.com','www.google.com','appleid.apple.com','facebook.com','www.facebook.com']};
+export const webLogin={url:'https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F',cookieUrl:'https://open.spotify.com/',cookieField:'cookie',requiredCookies:['sp_dc'],allowedHosts:['accounts.spotify.com','open.spotify.com','spotify.com','www.spotify.com','accounts.google.com','www.google.com','appleid.apple.com','facebook.com','www.facebook.com']};
 export const loginRequest={fields:[{id:'cookie',label:'Spotify session cookie',secret:true}],instructions:'Sign in to Spotify in the browser, or paste a cookie header containing sp_dc. Including sp_t enables personalization.'};
 export const loginUi={request:webLogin,labels:{title:'Sign in to Spotify',hint:loginRequest.instructions,error:'Spotify could not verify this session. Sign in again or retry.',retry:'Retry',cancel:'Cancel',login:'Sign in',logout:'Sign out'}};
 export function cookieInput(value) {
