@@ -2,6 +2,9 @@ package dev.metrofuse.spotify
 
 import androidx.compose.runtime.Composable
 import dev.metrofuse.api.*
+import dev.metrofuse.sdk.WebViewLabels
+import dev.metrofuse.sdk.WebViewLoginScreen
+import dev.metrofuse.sdk.WebViewLoginUi
 import dev.metrofuse.spotify.legacy.SpotifyCanvasClient
 import dev.metrofuse.spotify.legacy.Timber
 import dev.metrofuse.spotify.legacy.normalizeSpotifyCookieInput
@@ -24,7 +27,7 @@ class SpotifyPlugin :
 
     @Volatile private var cookie: String? = null
     private var revision = 0L
-    private var screen: SpotifyLoginScreen? = null
+    private var screen: WebViewLoginScreen? = null
     private var strings: Map<String, String> = emptyMap()
     private var catalog: SpotifyCatalog? = null
     private var host: PluginContext? = null
@@ -43,9 +46,11 @@ class SpotifyPlugin :
         LoginRequest(listOf(LoginField("cookie", strings.getValue("session"))), strings.getValue("instructions"))
 
     override suspend fun login(credentials: LoginCredentials): PluginLoginState {
+        host?.log("Spotify login: browser credentials received")
         val candidate = normalizeSpotifyCookieInput(credentials.values["cookie"].orEmpty()) ?: error("INVALID_CREDENTIALS")
         val generation = lock.withLock { ++revision }
         val user = withContext(Dispatchers.IO) { SpotifyCanvasClient.resolveAccountInfo(candidate) } ?: error("ACCOUNT_VERIFICATION_FAILED")
+        host?.log("Spotify login: account verified")
         return lock.withLock {
             if (generation != revision) throw CancellationException("Spotify login replaced")
             history?.close()
@@ -87,7 +92,15 @@ class SpotifyPlugin :
         strings =
             (Json.parseToJsonElement(context.resources.readAsset("assets/strings.json").toString(Charsets.UTF_8)) as JsonObject)
                 .mapValues { it.value.jsonPrimitive.content }
-        screen = SpotifyLoginScreen(browserRequest(), strings)
+        screen = WebViewLoginScreen(
+            WebViewLoginUi(
+                browserRequest(),
+                WebViewLabels(
+                    strings.getValue("title"), strings.getValue("instructions"), strings.getValue("error"),
+                    strings.getValue("retry"), strings.getValue("cancel"), strings.getValue("login"), strings.getValue("logout"),
+                ),
+            ),
+        )
         val provider = SpotifyCatalog(this, context).also { catalog = it }
         context.registerSearchProvider(provider)
         context.registerCatalogProvider(provider)

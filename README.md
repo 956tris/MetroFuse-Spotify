@@ -24,7 +24,7 @@ Back up your library and settings before migrating to the KMP Beta host. Beta bu
 
 ## Build and checks
 
-Version 1.0.2 captures the required Spotify service cookie without requiring an exact Web Player path, following the working YouTube Music plugin flow. Localized and alternate authenticated routes can complete login. Cookies are read only from the configured Spotify cookie origin, allowed navigation remains restricted to HTTPS, and the plugin verifies the candidate account before accepting or saving it. The Windows helper receives the same cookie-based request. Live verification of this change is pending.
+The host SDK opens Spotify sign-in with Android WebView or Windows WebView2 and captures the session from the Spotify Web Player origin. The plugin checks the captured session with Spotify's Web Player profile query and falls back to the Spotify Web API profile when needed. It saves the session after identifying the account.
 
 Build matching host API/SDK desktop JARs first, then run from this repository (PowerShell):
 
@@ -35,10 +35,9 @@ $hostCheckout = '/path/to/MetroFuse'
 node --test tests/test_spotify.mjs
 python tooling/package.py
 python tests/check_packages.py
-python tests/check_browser.py # Windows: validates the packaged login helper without opening a browser
 ```
 
-The native build uses compile-only host libraries and D8 for Android. The desktop package includes the SDK's Windows login helper; Android delegates to the host WebView. Package checks reject bundled host/runtime classes and desktop Skiko references in the Android DEX. `dist/SHA256SUMS` describes the resulting files. Backend tests cover queue duplicates, current-track matching, playback reporting transitions, account cleanup, timestamp units, login protocol and ABI descriptors. Live sign-in and live reporting have not been validated with a Spotify account.
+The native build uses compile-only host libraries and D8 for Android. The host SDK supplies the platform browser. Package checks reject bundled host/runtime classes and desktop Skiko references in the Android DEX. `dist/SHA256SUMS` describes the resulting files. Backend tests cover queue duplicates, current-track matching, playback reporting transitions, account cleanup, timestamp units, login protocol and ABI descriptors. Live sign-in and live reporting have not been validated with a Spotify account.
 
 ## Source and license
 

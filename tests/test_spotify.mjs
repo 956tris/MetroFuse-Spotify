@@ -93,3 +93,16 @@ test('browser login captures service cookies without requiring an exact Web Play
  assert.throws(()=>cookieInput('sp_dc='),/INVALID_CREDENTIALS/);
  assert.equal(cookieInput('sp_dc=fixture; sp_key=fixture'),'sp_dc=fixture; sp_key=fixture');
 });
+
+
+test('browser session verifies against the Spotify Web Player profile', async () => {
+  const session = ready(async request => {
+    assert.equal(request.url, 'https://api-partner.spotify.com/pathfinder/v2/query');
+    assert.equal(request.headers.Cookie, 'sp_dc=test');
+    assert.equal(JSON.parse(request.body).operationName, 'profileAttributes');
+    return response({data: {me: {profile: {name: ' ', username: 'listener'}}}});
+  });
+  session.cookie = null;
+  assert.deepEqual(await session.verify('sp_dc=test'), {loggedIn: true, accountName: 'listener'});
+  assert.equal(session.cookie, 'sp_dc=test');
+});

@@ -31,7 +31,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: 956tris/MetroFuse
-          ref: fc1abcd2cd6fb75d3bbc857ce585d6465ef7fb08
+          ref: f961b46c21526bc9a3775b40720fc0faeca9669a
           path: .ci/metrofuse
           submodules: recursive
           persist-credentials: false
@@ -129,7 +129,7 @@ jobs:
 
           Spotify supplies metadata, Home, library, Canvas and lyrics. Audio comes from a separately selected provider.
 
-          Uses the same SDK-owned platform browser and credential handoff as YouTube Music. The host SDK owns rendering, navigation, cookies, retry and cancellation; the plugin verifies the account before saving credentials. Apple and mobile Facebook redirects are accepted. This plugin requires a MetroFuse host containing the styled Android WebView rendering fix (fc1abcd2 or newer).
+          The Android sign-in flow uses the host SDK's browser and cookie handoff. Native listening history tracks playback when the host omits an occurrence ID and waits for Spotify to acknowledge playback start before reporting the listening threshold. Update to MetroFuse 10.0 Beta for the matching Android WebView implementation.
 
           Native and JavaScript protocol, account, catalog and playback tests run before packaging. APK and JAR manifests, Android bytecode and SHA-256 checksums are checked before publication. No live device or account login was verified by this build.
 

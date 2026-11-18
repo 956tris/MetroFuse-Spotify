@@ -1,5 +1,7 @@
 import {totp} from './encoding.js';
 
+const profileAttributesHash = '08ffb4730af3746e04a8301396f20875dbbce10c75243803091a9274eacc8ac0';
+
 export const webLogin={url:'https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F',cookieUrl:'https://open.spotify.com/',cookieField:'cookie',requiredCookies:['sp_dc'],allowedHosts:['accounts.spotify.com','open.spotify.com','spotify.com','www.spotify.com','accounts.google.com','www.google.com','appleid.apple.com','account.apple.com','facebook.com','www.facebook.com','m.facebook.com']};
 export const loginRequest={fields:[{id:'cookie',label:'Spotify session cookie',secret:true}],instructions:'Sign in to Spotify in the browser, or paste a cookie header containing sp_dc. Including sp_t enables personalization.'};
 export const loginUi={request:webLogin,labels:{title:'Sign in to Spotify',hint:loginRequest.instructions,error:'Spotify could not verify this session. Sign in again or retry.',retry:'Retry',cancel:'Cancel',login:'Sign in',logout:'Sign out'}};
@@ -70,10 +72,25 @@ export class SpotifySession {
     return this.json('https://api.spotify.com/v1'+path+(query?'?'+query:''),options,snapshot);
   }
   async verify(candidate) {
-    const revision=++this.revision,snapshot={cookie:cookieInput(candidate),revision};
-    const user=await this.rest('/me',{},snapshot);
-    if(typeof user.id!=='string'||!user.id)throw Error('ACCOUNT_VERIFICATION_FAILED');
-    this.check(snapshot);this.cookie=snapshot.cookie;return {loggedIn:true,accountName:typeof user.display_name==='string'&&user.display_name.trim()?user.display_name:user.id};
+    const snapshot = {cookie: cookieInput(candidate), revision: ++this.revision};
+    const nonBlank = value => typeof value === 'string' && value.trim() ? value : null;
+    let accountName;
+    try {
+      const data = await this.graph('profileAttributes', {}, snapshot);
+      const profile = data?.data?.me?.profile;
+      accountName = nonBlank(profile?.name) ?? nonBlank(profile?.username);
+    } catch (error) {
+      this.check(snapshot);
+      if (error.message === 'SPOTIFY_HTTP_429') throw error;
+    }
+    if (!accountName) {
+      const user = await this.rest('/me', {}, snapshot);
+      if (!nonBlank(user.id)) throw Error('ACCOUNT_VERIFICATION_FAILED');
+      accountName = nonBlank(user.display_name) ?? user.id;
+    }
+    this.check(snapshot);
+    this.cookie = snapshot.cookie;
+    return {loggedIn: true, accountName};
   }
   async desktopToken(snapshot=this.snapshot()) {
     this.check(snapshot);if(this.desktopCache?.cookie===snapshot.cookie&&this.desktopCache.expires>Date.now())return this.desktopCache.value;
@@ -111,6 +128,7 @@ export class SpotifySession {
     const operationHash=({fetchPlaylistContents:'fetchPlaylist',fetchPlaylistContentsWithGatedEntityRelations:'fetchPlaylist',removeFromLibrary:'addToLibrary'})[operation]??operation;
     if(refresh)this.hashes.delete(operationHash);
     let hash=this.hashes.get(operationHash);
+    if (!hash && !refresh && operationHash === 'profileAttributes') hash = profileAttributesHash;
     if(!hash) { await this.discoverHashes(new Set([operationHash]));hash=this.hashes.get(operationHash); }
     if(!hash)throw Error('SPOTIFY_GRAPHQL_OPERATION_UNAVAILABLE');
     const data=await this.json('https://api-partner.spotify.com/pathfinder/v2/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operationName:operation,variables,extensions:{persistedQuery:{version:1,sha256Hash:hash}}})},snapshot);

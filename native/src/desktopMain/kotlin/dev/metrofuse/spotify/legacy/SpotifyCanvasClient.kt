@@ -5,6 +5,7 @@
 
 package dev.metrofuse.spotify.legacy
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -382,6 +383,7 @@ object SpotifyCanvasClient {
     private val client =
         OkHttpClient
             .Builder()
+            .addInterceptor(SpotifyAuthDiagnostics())
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
             .callTimeout(25, TimeUnit.SECONDS)
@@ -836,6 +838,7 @@ object SpotifyCanvasClient {
         @Volatile var durationMs: Long,
         val createdAtMs: Long = System.currentTimeMillis(),
         val startReported: AtomicBoolean = AtomicBoolean(false),
+        val startMutex: Mutex = Mutex(),
         val thresholdReported: AtomicBoolean = AtomicBoolean(false),
         val finalized: AtomicBoolean = AtomicBoolean(false),
     )
@@ -1130,101 +1133,96 @@ object SpotifyCanvasClient {
             val normalizedCookie = normalizeSpotifyCookieInput(cookie) ?: return@withContext false
             val trackId = trackUri.spotifyTrackId() ?: return@withContext false
             val session = listeningHistorySession(trackUri, startedAtMs, durationMs, stateMachineId, stateId)
-            if (!session.startReported.compareAndSet(false, true)) return@withContext true
+            session.startMutex.withLock {
+                if (session.startReported.get()) return@withLock true
 
-            val webToken =
-                runCatching { ensureWebToken(normalizedCookie) }
-                    .onFailure { error ->
-                        Timber.w(error, "Spotify web token refresh failed for history start")
-                        notifyListeningHistoryFailure(
-                            compactListeningHistoryFailure(
-                                "Auth failed: ${error.message ?: error::class.java.simpleName.orEmpty()}",
-                            ),
-                        )
-                    }.getOrNull()
-                    ?: run {
-                        session.startReported.set(false)
-                        return@withContext false
-                    }
-            val device =
-                ensureListeningHistoryDevice(
-                    normalizedCookie = normalizedCookie,
-                    webToken = webToken,
-                    deviceName = deviceName,
-                ) ?: run {
-                    session.startReported.set(false)
-                    return@withContext false
-                }
-            val playbackState =
-                requestListeningHistoryPlaybackState(
-                    normalizedCookie = normalizedCookie,
-                    webToken = webToken,
-                    trackUri = trackUri,
-                    playbackContextUri = playbackContextUri,
-                    device = device,
-                )
-            if (playbackState == null) {
-                session.startReported.set(false)
-                return@withContext false
+                sendListeningHistoryStart(session, normalizedCookie, trackUri, trackId, durationMs, playbackContextUri, deviceName)
+                    .also(session.startReported::set)
             }
-            session.applyListeningHistoryPlaybackState(playbackState)
-
-            val batchReported =
-                reportListeningHistoryBatch(
-                    normalizedCookie = normalizedCookie,
-                    trackId = trackId,
-                    operation = "start",
-                    events =
-                        listOf(
-                            buildSpotifyPlaybackStartEvent(
-                                session = session,
-                                durationMs = durationMs,
-                            ),
-                        ),
-                )
-            if (!batchReported) {
-                session.startReported.set(false)
-                return@withContext false
-            }
-
-            val beforeLoadReported =
-                reportListeningHistoryState(
-                    normalizedCookie = normalizedCookie,
-                    trackId = trackId,
-                    session = session,
-                    operation = "before-track-load",
-                    debugSource = "before_track_load",
-                    positionMs = 0L,
-                    previousPositionMs = 0L,
-                    durationMs = session.durationMs,
-                    includePlaybackStats = false,
-                    webToken = webToken,
-                    device = device,
-                )
-            if (!beforeLoadReported) {
-                session.startReported.set(false)
-                return@withContext false
-            }
-
-            val startReported =
-                reportListeningHistoryState(
-                    normalizedCookie = normalizedCookie,
-                    trackId = trackId,
-                    session = session,
-                    operation = "start",
-                    debugSource = "started_playing",
-                    positionMs = session.durationMs.coerceAtLeast(0L).let { duration -> minOf(1_004L, duration) },
-                    previousPositionMs = 0L,
-                    durationMs = session.durationMs,
-                    includePlaybackStats = false,
-                    webToken = webToken,
-                    device = device,
-                )
-            if (!startReported) {
-                session.startReported.set(false)
-            }
-            startReported
         }
+
+    private suspend fun sendListeningHistoryStart(
+        session: SpotifyListeningHistorySession,
+        normalizedCookie: String,
+        trackUri: String,
+        trackId: String,
+        durationMs: Long,
+        playbackContextUri: String?,
+        deviceName: String,
+    ): Boolean {
+        val webToken =
+            runCatching { ensureWebToken(normalizedCookie) }
+                .onFailure { error ->
+                    if (error is CancellationException) throw error
+                    Timber.w(error, "Spotify web token refresh failed for history start")
+                    notifyListeningHistoryFailure(
+                        compactListeningHistoryFailure(
+                            "Auth failed: ${error.message ?: error::class.java.simpleName.orEmpty()}",
+                        ),
+                    )
+                }.getOrNull()
+                ?: return false
+        val device =
+            ensureListeningHistoryDevice(
+                normalizedCookie = normalizedCookie,
+                webToken = webToken,
+                deviceName = deviceName,
+            ) ?: return false
+        val playbackState =
+            requestListeningHistoryPlaybackState(
+                normalizedCookie = normalizedCookie,
+                webToken = webToken,
+                trackUri = trackUri,
+                playbackContextUri = playbackContextUri,
+                device = device,
+            ) ?: return false
+        session.applyListeningHistoryPlaybackState(playbackState)
+
+        val batchReported =
+            reportListeningHistoryBatch(
+                normalizedCookie = normalizedCookie,
+                trackId = trackId,
+                operation = "start",
+                events =
+                    listOf(
+                        buildSpotifyPlaybackStartEvent(
+                            session = session,
+                            durationMs = durationMs,
+                        ),
+                    ),
+            )
+        if (!batchReported) return false
+
+        val beforeLoadReported =
+            reportListeningHistoryState(
+                normalizedCookie = normalizedCookie,
+                trackId = trackId,
+                session = session,
+                operation = "before-track-load",
+                debugSource = "before_track_load",
+                positionMs = 0L,
+                previousPositionMs = 0L,
+                durationMs = session.durationMs,
+                includePlaybackStats = false,
+                webToken = webToken,
+                device = device,
+            )
+        if (!beforeLoadReported) return false
+
+        return reportListeningHistoryState(
+            normalizedCookie = normalizedCookie,
+            trackId = trackId,
+            session = session,
+            operation = "start",
+            debugSource = "started_playing",
+            positionMs = session.durationMs.coerceIn(0L, 1_004L),
+            previousPositionMs = 0L,
+            durationMs = session.durationMs,
+            includePlaybackStats = false,
+            webToken = webToken,
+            device = device,
+        )
+    }
 
     suspend fun reportListeningHistoryBestEffort(
         trackUri: String,
@@ -6861,6 +6859,24 @@ object SpotifyCanvasClient {
 
     suspend fun resolveAccountInfo(cookie: String): SpotifyAccountInfo? {
         val normalizedCookie = normalizeSpotifyCookieInput(cookie) ?: return null
+        try {
+            val profile =
+                postGraphQl<JsonObject>(
+                    operation = "profileAttributes",
+                    variables = buildJsonObject {},
+                    cookie = normalizedCookie,
+                    hashOverride = "08ffb4730af3746e04a8301396f20875dbbce10c75243803091a9274eacc8ac0",
+                    tokenProvider = ::ensureWebToken,
+                ).obj("data")?.obj("me")?.obj("profile")
+            val name = profile?.string("name")?.takeIf(String::isNotBlank)
+                ?: profile?.string("username")?.takeIf(String::isNotBlank)
+            if (name != null) return SpotifyAccountInfo(name = name, thumbnailUrl = profile?.string("avatar"))
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            if (error is SpotifyApiException && error.statusCode == 429) throw error
+        }
+
         val root =
             spotifyApiGet(
                 url = "https://api.spotify.com/v1/me".toHttpUrl(),

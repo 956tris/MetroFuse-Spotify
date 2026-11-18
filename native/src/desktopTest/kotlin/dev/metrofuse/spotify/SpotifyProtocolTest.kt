@@ -202,7 +202,7 @@ class SpotifyProtocolTest {
             )
 
         fun state(
-            instance: String,
+            instance: String?,
             position: Long,
             playing: Boolean = true,
         ) = PlaybackState(Track("spotify:track:$first", "Fixture", "Artist", "Album", 180000), playing, position).apply {
@@ -227,12 +227,19 @@ class SpotifyProtocolTest {
                 "playing:false",
                 "seek:50000",
                 "playing:true",
-                "stop",
                 "start:spotify:track:$first",
                 "stop",
             ),
             events,
         )
+        events.clear()
+        observer.accept(state(null, 0), true, 4000)
+        assertTrue(events.isEmpty())
+        observer.accept(state(null, 700), true, 4700)
+        observer.accept(state("late", 1000), true, 5000)
+        observer.accept(state(null, 1000, false), true, 5000)
+        observer.accept(state("late", 1000), true, 5200)
+        assertEquals(listOf("start:spotify:track:$first", "playing:false", "playing:true"), events)
     }
 
     @Test fun nativeCatalogUsesMillisecondsAndLyricsKeepsSubsecondSync() {

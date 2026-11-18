@@ -49,6 +49,8 @@ internal class PlaybackHistoryObserver(
     private var previous: PlaybackState? = null
     private var observedAt = 0L
     private var activeOccurrence: String? = null
+    private var activeTrackId: String? = null
+    private var activeQueueIndex: Int? = null
 
     fun accept(
         value: PlaybackState,
@@ -60,37 +62,46 @@ internal class PlaybackHistoryObserver(
         previous = value
         observedAt = now
         if (!enabled || value.track.id.isBlank()) {
-            if (activeOccurrence != null) actions.stop()
-            activeOccurrence = null
+            stop()
             return
         }
         val occurrence = value.playbackInstanceId
-        if (occurrence == null) {
-            // Decoder identity can arrive after the UI track/playing flows. Do not
-            // create a provisional listen that would split when the real ID arrives.
-            if (!value.playing && activeOccurrence != null) {
-                actions.stop()
-                activeOccurrence = null
-            }
-            return
-        }
         val track = value.track.legacy()
         val context = value.track.extras["spotify.contextUri"]
-        if (activeOccurrence != occurrence) {
-            if (activeOccurrence != null) actions.stop()
-            activeOccurrence = null
-            if (value.playing) {
-                activeOccurrence = occurrence
-                actions.start(track, context)
-                if (value.position > 1000) actions.seek(value.position, true, track, context)
+        val trackChanged = activeTrackId != value.track.id
+        val occurrenceChanged = occurrence != null && activeOccurrence != null && occurrence != activeOccurrence
+        val indexChanged = occurrence == null && activeQueueIndex != null &&
+            value.currentIndex != null && activeQueueIndex != value.currentIndex
+        if (trackChanged || occurrenceChanged || indexChanged) {
+            if (!value.playing) {
+                stop()
+                return
             }
+            // Some host controllers omit occurrence IDs. Wait for the playback clock to
+            // advance before starting a listen, and adopt a late ID on the same track.
+            if (track.duration <= 0) return
+            if (occurrence == null && (last == null || last.track.id != value.track.id || last.position >= value.position)) return
+            activeTrackId = value.track.id
+            activeQueueIndex = value.currentIndex
+            activeOccurrence = occurrence
+            actions.start(track, context)
+            if (value.position > 1000) actions.seek(value.position, true, track, context)
             return
         }
-        if (last != null && last.playing != value.playing) actions.state(value.playing, track, context)
-        if (last != null) {
+        if (occurrence != null) activeOccurrence = occurrence
+        if (value.currentIndex != null) activeQueueIndex = value.currentIndex
+        if (last != null && last.track.id == value.track.id) {
+            if (last.playing != value.playing) actions.state(value.playing, track, context)
             val expected = last.position + if (last.playing) elapsed else 0
             if (abs(value.position - expected) >= 2000) actions.seek(value.position, value.playing, track, context)
         }
+    }
+
+    private fun stop() {
+        if (activeTrackId != null) actions.stop()
+        activeTrackId = null
+        activeOccurrence = null
+        activeQueueIndex = null
     }
 }
 
@@ -165,7 +176,7 @@ internal class SpotifyPlaybackHistory(
                     override fun start(
                         track: MediaMetadata,
                         context: String?,
-                    ) = history.onSongStart(track, playbackContextUri = context)
+                    ) = history.onSongStart(track, playbackContextUri = context, newOccurrence = true)
 
                     override fun state(
                         playing: Boolean,

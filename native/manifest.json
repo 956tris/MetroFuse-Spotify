@@ -1,7 +1,7 @@
 {
   "id": "metrofuse.spotify",
   "name": "Spotify",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": "MetroFuse contributors",
   "runtime": "kotlin",
   "api": "1.1.0",

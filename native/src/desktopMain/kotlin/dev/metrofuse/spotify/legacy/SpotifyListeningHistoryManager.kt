@@ -126,6 +126,7 @@ class SpotifyListeningHistoryManager(
         metadata: MediaMetadata?,
         duration: Long? = null,
         playbackContextUri: String? = null,
+        newOccurrence: Boolean = false,
     ) {
         if (metadata == null) return
         if (metadata.isEpisode || metadata.isVideoSong) {
@@ -137,7 +138,7 @@ class SpotifyListeningHistoryManager(
             return
         }
         val mediaId = metadata.id
-        if (songStarted && activeMediaId == mediaId) {
+        if (!newOccurrence && songStarted && activeMediaId == mediaId) {
             activeMetadata = metadata
             if (!playbackContextUri.isNullOrBlank()) {
                 activePlaybackContextUri = playbackContextUri
@@ -152,6 +153,7 @@ class SpotifyListeningHistoryManager(
         }
 
         if (songStarted) {
+            if (pendingFinalization != null) finalizePendingSpotifyPlaybackSession(nextPlaybackId = null)
             pendingFinalization = captureSpotifyFinalization()
             stopReportTimer()
             startJob?.cancel()
@@ -628,6 +630,7 @@ class SpotifyListeningHistoryManager(
                     deviceName = deviceNameProvider(),
                 )
             if (!reported) {
+                synchronized(reportedKeys) { reportedKeys.remove(reportKey) }
                 Timber.i("Spotify listening history write unavailable for matched track %s", spotifyUri)
                 if (!wasSpotifyPresenceActive && activeMediaId == mediaId) {
                     setSpotifyPresenceActive(false)
