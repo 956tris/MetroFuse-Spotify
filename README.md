@@ -14,7 +14,13 @@ Spotify supplies metadata here; choose an audio provider separately in MetroFuse
 
 ## Host compatibility
 
-Use the patched MetroFuse **preview002** host released with this plugin. Earlier builds also identify themselves as 10.0.0, so the app version alone cannot distinguish compatibility. JavaScript requires the new binary HTTP/WebSocket bridge, locale information and lifecycle cancellation. Upcoming queue reconciliation uses the optional `UpcomingQueuePlayer` interface; the original API 1.1.0 constructors remain binary compatible. Native login additionally uses the platform-built SDK `PluginAlertDialog` entry point. Native packages use the matching Kotlin/Compose ABI embedded in their manifest. Older published hosts do not provide all required extensions.
+Use [MetroFuse KMP Beta](https://github.com/956tris/MetroFuse/releases) with this release. Earlier builds also identify themselves as 10.0.0, so the app version alone cannot distinguish compatibility. The Beta host includes Android login browser loading, retry and renderer recovery controls; supported WebViews use a separate login profile. JavaScript requires the new binary HTTP/WebSocket bridge, locale information and lifecycle cancellation. Upcoming queue reconciliation uses the optional `UpcomingQueuePlayer` interface; the original API 1.1.0 constructors remain binary compatible. Native login additionally uses the platform-built SDK `PluginAlertDialog` entry point. Native packages use the matching Kotlin/Compose ABI embedded in their manifest. Older published hosts do not provide all required extensions.
+
+## Installation and migration
+
+Download one package for your platform: `spotify.apk` for native Android, `spotify.jar` for native Windows/desktop, or `spotify.mfp` for JavaScript on Android/desktop. Open MetroFuse **Settings ? Integrations ? Plugins ? Import or update plugin**, select the package, and enable Spotify. Plugin APKs must be imported into MetroFuse, not installed with Android?s package installer. All variants share a plugin ID; import one variant at a time. Update an existing variant through the same import action, then sign in from the Spotify account screen if requested.
+
+Back up your library and settings before migrating to the KMP Beta host. Beta builds may crash or lose data during migration, and some features remain incomplete. Native plugins require the host ABI listed above; use matching releases rather than importing packages built for another ABI. Spotify?s private APIs can change, and account, Home, library and reporting behavior have not been fully verified with a live account. Spotify provides metadata, not audio; enable a separate audio provider for playback.
 
 ## Build and checks
 
