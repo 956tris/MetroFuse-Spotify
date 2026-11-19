@@ -15,6 +15,20 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class SpotifyProtocolTest {
+    @Test fun hostTrackPreservesSpotifyIdentityWithoutProviderExtras() = runBlocking {
+        val uri = "spotify:track:" + "1".repeat(22)
+        val hostTrack = Track("metrofuse:metrofuse.spotify:$uri", "Fixture", "Artist", "", 180_000)
+        assertEquals(uri, SpotifyCanvasClient.resolveTrackUriForHistory(hostTrack.legacy(), "sp_dc=fixture"))
+    }
+
+    @Test fun dealerConnectionIdCanArriveWithoutAUri() {
+        val message = buildJsonObject {
+            put("type", "message")
+            put("headers", buildJsonObject { put("Spotify-Connection-Id", "connection") })
+        }
+        assertEquals("connection", SpotifyCanvasClient.parseSpotifyDealerConnectionId(message))
+    }
+
     @Test fun browserHandoffCapturesServiceCookiesWithoutAnExactCompletionRoute() {
         val plugin: dev.metrofuse.api.LoginPlugin = SpotifyPlugin()
         assertTrue(plugin is dev.metrofuse.api.NativeLoginUi)

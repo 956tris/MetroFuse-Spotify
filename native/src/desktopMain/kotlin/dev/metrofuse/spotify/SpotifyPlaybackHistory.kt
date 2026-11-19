@@ -79,8 +79,12 @@ internal class PlaybackHistoryObserver(
             }
             // Some host controllers omit occurrence IDs. Wait for the playback clock to
             // advance before starting a listen, and adopt a late ID on the same track.
-            if (track.duration <= 0) return
-            if (occurrence == null && (last == null || last.track.id != value.track.id || last.position >= value.position)) return
+            if (track.duration <= 0 ||
+                (occurrence == null && (last == null || last.track.id != value.track.id || last.position >= value.position))
+            ) {
+                stop()
+                return
+            }
             activeTrackId = value.track.id
             activeQueueIndex = value.currentIndex
             activeOccurrence = occurrence
@@ -164,7 +168,7 @@ internal class SpotifyPlaybackHistory(
                             ?.jsonPrimitive
                             ?.booleanOrNull == true
                 }
-            }, { "MetroFuse" }, onSpotifyAutoplayQueueReady = { metadata ->
+            }, onSpotifyAutoplayQueueReady = { metadata ->
                 scope.launch {
                     val value = context.player.state.value
                     if (value.track.legacy().id == metadata.id) synchronizeQueue(value)

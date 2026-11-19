@@ -106,3 +106,49 @@ test('browser session verifies against the Spotify Web Player profile', async ()
   assert.deepEqual(await session.verify('sp_dc=test'), {loggedIn: true, accountName: 'listener'});
   assert.equal(session.cookie, 'sp_dc=test');
 });
+
+test('history starts a namespaced host track and reacquires state after Dealer closes', async () => {
+  const calls = [];
+  const session = ready(async request => {
+    calls.push(request);
+    return response(request.url.includes('apresolve')
+      ? {'dealer-g2':['gew4-dealer.g2.spotify.com:443'],spclient:['gew4-spclient.spotify.com:443']}
+      : {});
+  });
+  session.host.settings.get = async key => key === 'historyEnabled';
+  let opened = 0;
+  let pending = [];
+  const dealer = message => ({type:'text',text:JSON.stringify(message)});
+  session.host.socket = {
+    open: async () => {
+      opened++;
+      pending = [
+        dealer({type:'message',headers:{'Spotify-Connection-Id':'connection-'+opened}}),
+        dealer({type:'message',uri:'hm://track-playback/v1/command',payloads:[{
+          type:'replace_state',
+          state_machine:{...machine,state_machine_id:'machine-'+opened},
+          state_ref:{state_index:0}
+        }]})
+      ];
+      return 'socket-'+opened;
+    },
+    receive: async () => pending.shift() ?? null,
+    close: async () => {}
+  };
+  const player = new SpotifyWebPlayer(session, {});
+  const item = {...track(raw()),id:'metrofuse:metrofuse.spotify:'+URI,extras:{}};
+  const playback = {track:item,playing:true,position:0,playbackInstanceId:'listen'};
+  await player.observe(playback);
+  assert.equal(player.current.trackUri, URI);
+  pending.push({type:'close'});
+  await assert.rejects(player.observe(playback), /SPOTIFY_DEALER_CLOSED/);
+  await player.observe({...playback,playing:false});
+  assert.equal(opened, 2);
+  const reports = calls.filter(call => call.url.endsWith('/state')).map(call => JSON.parse(call.body));
+  assert.equal(reports.at(-1).state_ref.state_machine_id, 'machine-2');
+  assert.equal(reports.at(-1).state_ref.paused, true);
+  const batches = calls.filter(call => call.url.endsWith('/msg/batch')).map(call => JSON.parse(call.body));
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0].messages[0].message.play_track, URI);
+  await player.stop();
+});

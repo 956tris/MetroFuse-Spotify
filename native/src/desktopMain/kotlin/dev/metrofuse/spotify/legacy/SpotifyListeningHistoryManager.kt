@@ -21,7 +21,7 @@ import kotlin.math.min
 class SpotifyListeningHistoryManager(
     private val scope: CoroutineScope,
     private val cookieProvider: suspend () -> String?,
-    private val deviceNameProvider: () -> String,
+    private val deviceNameProvider: () -> String = { SpotifyCanvasClient.SPOTIFY_HISTORY_DEVICE_NAME },
     private val onSpotifyPresenceActiveChanged: (Boolean) -> Unit = {},
     private val onSpotifyAutoplayQueueReady: (MediaMetadata) -> Unit = {},
     var minSongDuration: Int = 30,

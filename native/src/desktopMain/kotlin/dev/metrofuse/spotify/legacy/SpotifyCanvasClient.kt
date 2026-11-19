@@ -332,7 +332,7 @@ object SpotifyCanvasClient {
     private const val SPOTIFY_HISTORY_FINAL_PLATFORM = "web_player windows 10;chrome 148.0.0.0;desktop"
     private const val SPOTIFY_HISTORY_FINAL_SDK_ID = "harmony:4.72.0"
     private const val SPOTIFY_HISTORY_DEVICE_MODEL = "harmony-4.72.0-web-player"
-    private const val SPOTIFY_HISTORY_DEVICE_NAME = "Spotify Web Player"
+    internal const val SPOTIFY_HISTORY_DEVICE_NAME = "MetroFuse"
     private const val SPOTIFY_HISTORY_BITRATE = 128_000
     private const val SPOTIFY_HISTORY_SESSION_TTL_MS = 45 * 60 * 1000L
     private const val SPOTIFY_HISTORY_DEVICE_TTL_MS = 45 * 60 * 1000L
@@ -832,6 +832,8 @@ object SpotifyCanvasClient {
         @Volatile var stateId: String,
         @Volatile var statePaused: Boolean = false,
         @Volatile var playbackId: String,
+        @Volatile var deviceId: String? = null,
+        @Volatile var contextUri: String? = null,
         val sessionId: String,
         val correlationId: String,
         val startedAtMs: Long,
@@ -856,24 +858,38 @@ object SpotifyCanvasClient {
 
     private class SpotifyDealerCommandQueue {
         private val pendingCommands = ArrayDeque<JsonObject>()
-        private var waitingForCommand: CompletableDeferred<JsonObject>? = null
+        private var waitingForCommand: CompletableDeferred<JsonObject?>? = null
+
+        @Volatile
+        var closed = false
+            private set
 
         @Synchronized
-        fun nextCommand(): CompletableDeferred<JsonObject> {
+        fun nextCommand(): CompletableDeferred<JsonObject?> {
+            if (closed) return CompletableDeferred(null)
             if (pendingCommands.isNotEmpty()) {
                 return CompletableDeferred(pendingCommands.removeFirst())
             }
-            return CompletableDeferred<JsonObject>().also { waitingForCommand = it }
+            return CompletableDeferred<JsonObject?>().also { waitingForCommand = it }
         }
 
         @Synchronized
         fun offer(command: JsonObject) {
+            if (closed) return
             val waiter = waitingForCommand
             if (waiter != null) {
                 waitingForCommand = null
                 if (waiter.complete(command)) return
             }
             pendingCommands.addLast(command)
+        }
+
+        @Synchronized
+        fun close() {
+            closed = true
+            pendingCommands.clear()
+            waitingForCommand?.complete(null)
+            waitingForCommand = null
         }
     }
 
@@ -905,14 +921,13 @@ object SpotifyCanvasClient {
     ) {
         private val sequenceNumber = AtomicInteger(initialSequenceNumber)
 
-        @Volatile
-        var closed: Boolean = false
-            private set
+        val closed: Boolean get() = commandQueue.closed
+        val commandMutex = Mutex()
 
         fun nextSequenceNumber(): Int = sequenceNumber.incrementAndGet()
 
         fun close() {
-            closed = true
+            commandQueue.close()
             runCatching {
                 webSocket.close(1000, "history-device-refresh")
             }
@@ -1177,6 +1192,8 @@ object SpotifyCanvasClient {
                 device = device,
             ) ?: return false
         session.applyListeningHistoryPlaybackState(playbackState)
+        session.deviceId = device.deviceId
+        session.contextUri = playbackContextUri
 
         val batchReported =
             reportListeningHistoryBatch(
@@ -1620,6 +1637,21 @@ object SpotifyCanvasClient {
                     deviceName = deviceName,
                 ) ?: return false
 
+        if (session.deviceId != resolvedDevice.deviceId) {
+            if (operation == "finalize") return true
+            val state =
+                requestListeningHistoryPlaybackState(
+                    normalizedCookie = normalizedCookie,
+                    webToken = resolvedWebToken,
+                    trackUri = session.trackUri,
+                    playbackContextUri = session.contextUri,
+                    device = resolvedDevice,
+                ) ?: return false
+            session.stateMachineId = state.stateMachineId
+            session.stateId = state.stateId
+            session.deviceId = resolvedDevice.deviceId
+        }
+
         val payload =
             buildSpotifyPlaybackStatePayload(
                 session = session,
@@ -1734,6 +1766,7 @@ object SpotifyCanvasClient {
                     dealerConnection = dealerConnection,
                 )
             }.onFailure { error ->
+                if (error is CancellationException) throw error
                 Timber.w(error, "Spotify listening history web device registration failed")
                 notifyListeningHistoryFailure(
                     compactListeningHistoryFailure(
@@ -1760,7 +1793,7 @@ object SpotifyCanvasClient {
         trackUri: String,
         playbackContextUri: String? = null,
         device: SpotifyListeningHistoryDevice,
-    ): SpotifyListeningHistoryPlaybackState? {
+    ): SpotifyListeningHistoryPlaybackState? = device.commandMutex.withLock {
         val trackId = trackUri.spotifyTrackId()
         val stationUri = trackId?.let { "spotify:station:track:$it" }
         val resolvedPlaybackContextUri =
@@ -1788,6 +1821,7 @@ object SpotifyCanvasClient {
             }.distinct()
 
         for ((index, contextUri) in contextUris.withIndex()) {
+            if (device.closed) return@withLock null
             val last = index == contextUris.lastIndex
             requestListeningHistoryPlaybackStateWithContext(
                 normalizedCookie = normalizedCookie,
@@ -1797,10 +1831,10 @@ object SpotifyCanvasClient {
                 device = device,
                 notifyFailures = last,
                 clearDeviceOnClientError = last,
-            )?.let { return it }
+            )?.let { return@withLock it }
         }
 
-        return null
+        null
     }
 
     private suspend fun resolveSpotifyPlaylistFormatUri(
@@ -1948,7 +1982,7 @@ object SpotifyCanvasClient {
 
     private suspend fun awaitSpotifyPlaybackStateFromDealer(
         device: SpotifyListeningHistoryDevice,
-        firstCommandWait: CompletableDeferred<JsonObject>,
+        firstCommandWait: CompletableDeferred<JsonObject?>,
         expectedTrackId: String?,
         contextUri: String,
         notifyFailures: Boolean,
@@ -1959,9 +1993,10 @@ object SpotifyCanvasClient {
         val playbackState =
             withTimeoutOrNull(SPOTIFY_HISTORY_DEALER_TIMEOUT_MS) {
                 while (true) {
+                    val command = nextCommandWait.await() ?: return@withTimeoutOrNull null
                     val parsed =
                         spotifyPlaybackStateFromDealerCommand(
-                            command = nextCommandWait.await(),
+                            command = command,
                             expectedTrackId = expectedTrackId,
                         )
                     parsed.playbackState?.let { return@withTimeoutOrNull it }
@@ -2035,7 +2070,6 @@ object SpotifyCanvasClient {
         val deferred = CompletableDeferred<SpotifyDealerConnection>()
         val commandQueue = SpotifyDealerCommandQueue()
         val encodedToken = URLEncoder.encode(webToken, Charsets.UTF_8.name())
-        lateinit var webSocket: WebSocket
         val request =
             Request
                 .Builder()
@@ -2047,9 +2081,15 @@ object SpotifyCanvasClient {
                     webSocket: WebSocket,
                     text: String,
                 ) {
-                    parseSpotifyDealerPlaybackCommand(text)?.let(commandQueue::offer)
-                    parseSpotifyDealerConnectCluster(text)?.let(::cacheSpotifyConnectClusterQueue)
-                    parseSpotifyDealerConnectionId(text)?.let { connectionId ->
+                    val message = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
+                    if (message.string("type") == "ping") {
+                        webSocket.send("""{"type":"pong"}""")
+                        return
+                    }
+                    if (message.string("type") != "message") return
+                    parseSpotifyDealerPlaybackCommand(message)?.let(commandQueue::offer)
+                    parseSpotifyDealerConnectCluster(message)?.let(::cacheSpotifyConnectClusterQueue)
+                    parseSpotifyDealerConnectionId(message)?.let { connectionId ->
                         if (deferred.complete(SpotifyDealerConnection(connectionId, webSocket, commandQueue))) {
                             Timber.d("Spotify Dealer connection id received")
                         }
@@ -2061,7 +2101,13 @@ object SpotifyCanvasClient {
                     t: Throwable,
                     response: Response?,
                 ) {
+                    commandQueue.close()
                     deferred.completeExceptionally(t)
+                }
+
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    commandQueue.close()
+                    webSocket.close(1000, null)
                 }
 
                 override fun onClosed(
@@ -2069,40 +2115,38 @@ object SpotifyCanvasClient {
                     code: Int,
                     reason: String,
                 ) {
+                    commandQueue.close()
                     if (!deferred.isCompleted) {
                         deferred.completeExceptionally(IllegalStateException("Dealer closed before connection id"))
                     }
                 }
             }
 
-        webSocket = dealerClient.newWebSocket(request, listener)
-        return withTimeoutOrNull(SPOTIFY_HISTORY_DEALER_TIMEOUT_MS) {
-            deferred.await()
-        } ?: run {
-            webSocket.close(1000, "history-device-timeout")
-            error("Dealer connection id timed out")
+        val webSocket = dealerClient.newWebSocket(request, listener)
+        try {
+            return withTimeoutOrNull(SPOTIFY_HISTORY_DEALER_TIMEOUT_MS) {
+                deferred.await()
+            } ?: error("Dealer connection id timed out")
+        } catch (error: Exception) {
+            commandQueue.close()
+            webSocket.cancel()
+            throw error
         }
     }
 
-    private fun parseSpotifyDealerConnectionId(message: String): String? =
+    internal fun parseSpotifyDealerConnectionId(root: JsonObject): String? =
         runCatching {
-            val root = json.parseToJsonElement(message).jsonObject
-            if (root.string("type") != "message") return@runCatching null
-            val uri = root.string("uri") ?: return@runCatching null
             root
                 .obj("headers")
                 ?.string("Spotify-Connection-Id")
-                ?: SPOTIFY_DEALER_CONNECTION_REGEX
-                    .find(uri)
+                ?: root.string("uri")?.let(SPOTIFY_DEALER_CONNECTION_REGEX::find)
                     ?.groupValues
                     ?.getOrNull(1)
                     ?.let { URLDecoder.decode(it, Charsets.UTF_8.name()) }
         }.getOrNull()
 
-    private fun parseSpotifyDealerPlaybackCommand(message: String): JsonObject? =
+    private fun parseSpotifyDealerPlaybackCommand(root: JsonObject): JsonObject? =
         runCatching {
-            val root = json.parseToJsonElement(message).jsonObject
-            if (root.string("type") != "message") return@runCatching null
             if (root.string("uri") != "hm://track-playback/v1/command") return@runCatching null
             root
                 .array("payloads")
@@ -2111,10 +2155,8 @@ object SpotifyCanvasClient {
                 ?.takeIf { it.string("type") == "replace_state" }
         }.getOrNull()
 
-    private fun parseSpotifyDealerConnectCluster(message: String): JsonObject? =
+    private fun parseSpotifyDealerConnectCluster(root: JsonObject): JsonObject? =
         runCatching {
-            val root = json.parseToJsonElement(message).jsonObject
-            if (root.string("type") != "message") return@runCatching null
             if (root.string("uri")?.endsWith("connect-state/v1/cluster") != true) return@runCatching null
             root
                 .array("payloads")

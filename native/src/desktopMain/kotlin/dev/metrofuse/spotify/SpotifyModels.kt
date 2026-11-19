@@ -50,7 +50,7 @@ internal fun dev.metrofuse.spotify.legacy.HomePage.shelves() = sections.map { Ho
 
 internal fun Track.legacy() =
     MediaMetadata(
-        extras["providerTrackId"] ?: extras["spotify.uri"] ?: id,
+        extras["providerTrackId"] ?: extras["spotify.uri"] ?: id.removePrefix("metrofuse:metrofuse.spotify:"),
         title,
         listOf(
             dev.metrofuse.spotify.legacy
