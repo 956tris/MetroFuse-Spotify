@@ -35,6 +35,7 @@ globalThis.plugin={
     host.catalog('spotify.catalog',{album:id=>catalog.album(id),artist:id=>catalog.artist(id),playlist:id=>catalog.playlist(id),library:request=>catalog.library(request),supportsLikedSongs:true,setSongVote:request=>catalog.liked(request),
       recommendations:request=>webplayer.enqueue(()=>webplayer.queue(request))});
     host.metadataSource('spotify.metadata',async request=>{
+      if(!session.cookie)return null;
       const value=await catalog.resolve(request);if(!value)return null;
       const snapshot=session.snapshot(),mix=await host.settings.get('mixMetadataEnabled')?await catalog.mix(value.id):{};
       const canvas=await host.settings.get('canvasEnabled')?await catalog.canvas({track:value}):{};session.check(snapshot);

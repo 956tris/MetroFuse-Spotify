@@ -128,7 +128,7 @@ internal class SpotifyCatalog(
         }
 
     override suspend fun resolve(request: MetadataRequest): MetadataContribution? =
-        plugin.account { cookie ->
+        plugin.accountIfSignedIn { cookie ->
             val base =
                 context.metadata.value.takeIf { it.id == request.identity.canonicalId } ?: Track(
                     request.identity.canonicalId,
@@ -149,7 +149,7 @@ internal class SpotifyCatalog(
                         .orEmpty(),
                 )
             val source = base.copy(id = request.identity.identifiers["spotify"] ?: base.id)
-            val uri = SpotifyCanvasClient.resolveTrackUriForMix(source.legacy(), cookie) ?: return@account null
+            val uri = SpotifyCanvasClient.resolveTrackUriForMix(source.legacy(), cookie) ?: return@accountIfSignedIn null
             val fields =
                 buildMap<String, JsonElement> {
                     put("spotify.uri", JsonPrimitive(uri))

@@ -33,10 +33,13 @@ class SpotifyPlugin :
     private var host: PluginContext? = null
     private var history: SpotifyPlaybackHistory? = null
 
-    internal fun session(): String = cookie ?: throw IllegalStateException("LOGIN_REQUIRED")
+    internal suspend fun <T> account(block: suspend (String) -> T): T =
+        account(cookie ?: error("LOGIN_REQUIRED"), block)
 
-    internal suspend fun <T> account(block: suspend (String) -> T): T {
-        val snapshot = session()
+    internal suspend fun <T> accountIfSignedIn(block: suspend (String) -> T): T? =
+        cookie?.let { account(it, block) }
+
+    private suspend fun <T> account(snapshot: String, block: suspend (String) -> T): T {
         val value = block(snapshot)
         if (cookie !== snapshot) throw CancellationException("Spotify account changed")
         return value

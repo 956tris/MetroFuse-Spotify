@@ -19,6 +19,19 @@ test('cookie input rejects injection and keeps only Spotify cookies',()=>{assert
 test('REST metadata keeps factual ISRC, IDs and milliseconds',()=>{const value=track(raw());assert.equal(value.duration,180000);assert.equal(value.extras.isrc,'USAAA0000001');assert.equal(value.extras.explicit,'true');assert.equal(JSON.parse(value.extras['spotify.metadata']).name,'One');assert.equal(album(raw().album).title,'Album');assert.equal(artist(raw().artists[0]).name,'Artist');});
 test('GraphQL wrapped tracks retain library _uri',()=>{const value=track({track:{_uri:URI,data:{...raw(),id:undefined}}});assert.equal(value.id,URI);});
 test('metadata matching rejects wrong artist and wrong duration',()=>{const candidate=track(raw());assert.equal(matchTrack([candidate],{title:'One',artist:'Unrelated',duration:180000}),null);assert.equal(matchTrack([candidate],{title:'One',artist:'Artist',duration:220000}),null);assert.equal(matchTrack([candidate],{isrc:'US-AAA-00-00001'}),candidate);});
+test('metadata provider skips requests while signed out',async()=>{
+  await import('../javascript/index.js');
+  let resolveMetadata;
+  const ignore=()=>{};
+  const host={...authHost(()=>assert.fail('Signed-out lookup made a request')),login:ignore,home:ignore,search:ignore,catalog:ignore,lyrics:ignore,service:ignore,on:ignore,
+    metadataSource:(_id,resolve)=>{resolveMetadata=resolve;}};
+  await globalThis.plugin.init(host);
+  try {
+    assert.equal(await resolveMetadata({identity:{canonicalId:URI}}),null);
+  } finally {
+    await globalThis.plugin.dispose();
+  }
+});
 test('Home parses factual album and playlist shelf',()=>{const shelves=homeShelves({sections:[{title:{text:'For you'},sectionItems:{items:[{data:{...raw().album,uri:'spotify:album:'+OTHER,__typename:'Album'}},{data:{id:ID,name:'Playlist',type:'playlist'}}]}}]});assert.equal(shelves.length,1);assert.equal(shelves[0].items.length,2);});
 test('Canvas verifies requested URI and rejects manifests',()=>{const safe='https://canvaz.scdn.co/a.mp4',canvas=uri=>protoBytes(1,[...protoString(2,safe),...protoString(5,uri)]);assert.equal(parseCanvas(canvas(URI),URI),safe);assert.equal(parseCanvas(canvas('spotify:track:'+OTHER),URI),null);for(const url of ['http://canvaz.scdn.co/a.mp4','https://evil.com/a.mp4','https://canvaz.scdn.co/a.m3u8'])assert.equal(usableCanvas(url),false);});
 test('lyrics preserve synchronized timestamps',()=>{assert.deepEqual(lyrics({lyrics:{syncType:'LINE_SYNCED',lines:[{words:'hi',startTimeMs:'1000'}]}}).lines,[{text:'hi',timeMs:1000}]);});

@@ -15,6 +15,13 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class SpotifyProtocolTest {
+    @Test fun optionalMetadataAccountSkipsLookupWhileSignedOut() = runBlocking {
+        val plugin = SpotifyPlugin()
+        assertNull(plugin.accountIfSignedIn { fail("Signed-out metadata lookup must skip the provider") })
+        assertFailsWith<IllegalStateException> { plugin.account { fail("Account-only lookup requires sign-in") } }
+        Unit
+    }
+
     @Test fun hostTrackPreservesSpotifyIdentityWithoutProviderExtras() = runBlocking {
         val uri = "spotify:track:" + "1".repeat(22)
         val hostTrack = Track("metrofuse:metrofuse.spotify:$uri", "Fixture", "Artist", "", 180_000)
