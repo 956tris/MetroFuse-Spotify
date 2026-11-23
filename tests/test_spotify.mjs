@@ -54,6 +54,41 @@ test('Canvas verifies requested URI and rejects manifests',()=>{const safe='http
 test('lyrics preserve synchronized timestamps',()=>{assert.deepEqual(lyrics({lyrics:{syncType:'LINE_SYNCED',lines:[{words:'hi',startTimeMs:'1000'}]}}).lines,[{text:'hi',timeMs:1000}]);});
 test('state-machine queue retains adjacent duplicates and cycle completeness',()=>{const queue=stateMachineQueue(machine,{state_index:0});assert.deepEqual(queue.tracks.map(t=>t.id),[URI,URI,'spotify:track:'+OTHER]);assert.equal(queue.complete,true);const cyclic=structuredClone(machine);cyclic.states[2].transitions={show_next:{state_index:0}};assert.equal(stateMachineQueue(cyclic,{state_index:0}).complete,false);});
 test('Connect cluster order preserves repetitions',()=>{const value=clusterQueue({player_state:{track:{uri:URI,metadata:{name:'One'}},next_tracks:[{uri:URI,metadata:{name:'One'}},{uri:'spotify:track:'+OTHER,metadata:{name:'Two'}}]}});assert.deepEqual(value.tracks.map(x=>x.id),[URI,URI,'spotify:track:'+OTHER]);});
+test('reads the full Spotify queue without issuing playback commands or shrinking to a Connect preview', async () => {
+  const calls = [];
+  const session = ready(request => {
+    calls.push([request.method, new URL(request.url).pathname]);
+    return response({currently_playing: raw(), queue: [raw(OTHER), raw(OTHER), raw()]});
+  });
+  const player = new SpotifyWebPlayer(session, {});
+  player.open = async () => assert.fail('Full queue reads must not open a playback device');
+  const result = await player.queue({track: track(raw()), refresh: true});
+  const expected = ['spotify:track:' + OTHER, 'spotify:track:' + OTHER, URI];
+  assert.equal(result.complete, true);
+  assert.deepEqual(result.tracks.map(item => item.id), expected);
+  assert.deepEqual(calls, [['GET', '/v1/me/player/queue']]);
+  const preview = clusterQueue({player_state: {track: raw(), next_tracks: [raw(OTHER)]}});
+  player.cacheQueue(preview, session.snapshot(), {preview: true});
+  assert.deepEqual((await player.queue({track: track(raw())})).tracks.map(item => item.id), expected);
+});
+
+test('history playback commands preserve playlist context and leave an active Spotify playlist alone', async () => {
+  const session = ready(() => assert.fail('Unexpected HTTP request'));
+  const player = new SpotifyWebPlayer(session, {});
+  const contextUri = 'spotify:playlist:' + OTHER;
+  const source = playlist({id: OTHER, name: 'Playlist'}, [track(raw())]).tracks[0];
+  assert.equal(source.extras['spotify.contextUri'], contextUri);
+  player.open = async () => ({deviceId: 'plugin'});
+  session.rest = async () => ({device: {id: 'external'}, context: {uri: contextUri}});
+  const commands = [];
+  player.post = async (_path, body) => { commands.push(body.command.context.uri); };
+  await assert.rejects(player.requestState(source, session.snapshot(), contextUri), /SPOTIFY_PLAYLIST_ACTIVE/);
+  assert.deepEqual(commands, []);
+  session.rest = async () => ({});
+  player.waitCommand = async () => ({state_machine: machine, state_ref: {state_index: 0}});
+  await player.requestState(source, session.snapshot(), contextUri);
+  assert.deepEqual(commands, [contextUri]);
+});
 test('GID decoding and ads',()=>{assert.equal(machineTrack({gid:'00000000000000000000000000000001',metadata:{name:'One'}}).id,URI);assert.equal(machineTrack({gid:base64([...Array(15).fill(0),1]),metadata:{name:'One'}}).id,URI);assert.equal(machineTrack({uri:URI,type:'ad',metadata:{name:'Ad'}}),null);});
 test('dealer messages parse ping, real state command and connection ID',()=>{assert.equal(dealerMessage('{"type":"ping"}').ping,true);assert.equal(dealerMessage({type:'message',headers:{'Spotify-Connection-Id':'connection'},payloads:[]}).connectionId,'connection');assert.equal(dealerMessage({type:'message',uri:'hm://track-playback/v1/command',payloads:[{type:'replace_state',state_machine:machine}]}).command.state_machine,machine);});
 test('state and history payloads carry state reference and observed elapsed playback',()=>{const s={stateMachineId:'machine',stateId:'s0',durationMs:180000,playbackId:'real',trackUri:URI,sessionId:'session',correlationId:'correlation',startedAtMs:1000};const body=statePayload(s,{position:5000,previousPosition:1000,paused:false,stats:true},7);assert.equal(body.state_ref.state_id,'s0');assert.equal(body.seq_num,7);assert.equal(body.sub_state.position,5000);const events=historyEvents(s,'finalize',51000);assert.equal(events[0].message.ms_played,51000);assert.equal(events[1].message.playback_id,'real');});
@@ -104,7 +139,7 @@ test('same-occurrence dealer queue change reconciles host upcoming tracks',async
   if(request.url.endsWith('/connect-state/v1/cluster'))return response({player_state:{track:{uri:URI,metadata:{name:'One'}},next_tracks:currentNext}});
   return response({initial_seq_num:0});
  });Object.assign(host,{settings:{get:async key=>key==='queueSyncEnabled'},login:value=>registered.login=value,loginState(){},home(){},search(){},catalog(){},metadataSource(){},lyrics(){},service(){},on:(key,fn)=>{registered[key]=fn;return()=>{};},playerCapabilities:()=>['replaceUpcomingQueue'],replaceUpcomingQueue:async tracks=>replaced.push(tracks),socket:{open:async()=>{events.push({type:'text',text:JSON.stringify({type:'message',headers:{'Spotify-Connection-Id':'conn'},payloads:[]})});return 'socket';},close:async()=>{},send:async()=>{},receive:async()=>events.shift()??null}});
- await globalThis.plugin.init(host);await registered.login.login({values:{cookie:'sp_dc=test'}});const playback={track:track(raw()),playing:true,position:0,playbackInstanceId:'same'};await registered.playback_changed(playback);assert.deepEqual(replaced[0].map(t=>t.id),['metrofuse:metrofuse.spotify:'+URI]);
+ await globalThis.plugin.init(host);await registered.login.login({values:{cookie:'sp_dc=test'}});const playback={track:track(raw()),playing:true,position:0,playbackInstanceId:'same'};await registered.playback_changed({...playback,currentIndex:0,queue:[playback.track,track(raw(OTHER))]});assert.equal(replaced.length,0);await registered.playback_changed(playback);assert.deepEqual(replaced[0].map(t=>t.id),['metrofuse:metrofuse.spotify:'+URI]);
  currentNext=[{uri:'spotify:track:'+OTHER,metadata:{name:'Two'}}];events.push({type:'text',text:JSON.stringify({type:'message',uri:'hm://connect-state/v1/cluster',payloads:[{cluster:{player_state:{track:{uri:URI,metadata:{name:'One'}},next_tracks:currentNext}}}]})});await registered.playback_changed({...playback,position:1000});assert.deepEqual(replaced[1].map(t=>t.id),['metrofuse:metrofuse.spotify:spotify:track:'+OTHER]);await registered.playback_changed({...playback,position:2000});assert.equal(replaced.length,2);await globalThis.plugin.dispose();
 });
 test('history waits for physical playback ID and missing-to-real transition creates one listen',async()=>{const session=ready(()=>{});session.host.settings.get=async()=>true;const player=new SpotifyWebPlayer(session,{}),seen=[];player.begin=async(item,p)=>{seen.push(['begin',p.playbackInstanceId]);player.current={hostTrackId:item.id,occurrence:p.playbackInstanceId,lastTime:Date.now(),lastPosition:p.position,playing:p.playing,durationMs:180000,playedMs:0,reported:false};};player.finish=async()=>{seen.push(['finish']);player.current=null;};player.reportState=async()=>{};const playback={track:track(raw()),playing:true,position:0,currentIndex:3};await player.observe(playback);await player.observe({...playback,playbackInstanceId:''});assert.deepEqual(seen,[]);await player.observe({...playback,playbackInstanceId:'physical'});await player.observe({...playback,playbackInstanceId:'physical',position:1000});assert.deepEqual(seen,[['begin','physical']]);await player.observe({...playback,position:2000});assert.deepEqual(seen,[['begin','physical']]);await player.observe({...playback,playing:false});assert.deepEqual(seen,[['begin','physical'],['finish']]);});

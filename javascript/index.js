@@ -1,8 +1,8 @@
 /* Ported from MetroFuse/MetroList legacy Spotify integration. GPL-3.0; see SOURCE. */
 import {SpotifySession,loginRequest,loginUi} from './modules/account.js';
 import {SpotifyCatalog,entityId} from './modules/catalog.js';
-import {SpotifyWebPlayer} from './modules/webplayer.js';
-let host,session,catalog,webplayer,unsubscribe,lastQueueOccurrence,lastQueueKey,lastQueueRefresh=0;
+import {SpotifyWebPlayer,isPlaylistContext} from './modules/webplayer.js';
+let host,session,catalog,webplayer,unsubscribe,lastQueueOccurrence,lastQueueKey,lastQueueRefresh=0,importedQueue;
 
 async function artistMetadata(request) {
   const value=await catalog.artist(request.id);if(!value)return {};
@@ -15,22 +15,40 @@ function ownTrack(track) {
   const fullId='metrofuse:metrofuse.spotify:spotify:track:'+rawId;
   return {...track,id:fullId,extras:{...track.extras,pluginOwner:'metrofuse.spotify',providerTrackId:'spotify:track:'+rawId}};
 }
+function canImportQueue(playback) {
+  if (isPlaylistContext(playback.track.extras?.['spotify.contextUri'])) return false;
+  const queue = playback.queue;
+  return !Array.isArray(queue)||queue.length<=1||
+    (queue.length===importedQueue?.length&&queue.every((track,i)=>track.id===importedQueue[i]));
+}
 async function playbackChanged(playback,revision) {
   if(!session.cookie||revision!==session.revision)return;
-  await webplayer.observe(playback);
+  await webplayer.observe(playback).catch(error=>{
+    if(error.message==='ACCOUNT_CHANGED'||error.message==='PLUGIN_STOPPED')throw error;
+    host.log('Spotify listening history update failed');
+  });
   if(!session.cookie||revision!==session.revision||!await host.settings.get('queueSyncEnabled'))return;
   if(!host.playerCapabilities?.().includes('replaceUpcomingQueue'))return;
   const occurrence=playback?.playbackInstanceId??playback?.currentIndex??playback?.queueIndex??playback?.track?.id;
-  if(!playback?.track||!playback.playing)return;
+  if(!playback?.track||!playback.playing||!canImportQueue(playback))return;
   const snapshot=session.snapshot();
   const refresh=occurrence!==lastQueueOccurrence||Date.now()-lastQueueRefresh>=15000;
-  const result=await webplayer.queue({track:playback.track,refresh});session.check(snapshot);if(refresh)lastQueueRefresh=Date.now();
+  if(refresh){lastQueueOccurrence=occurrence;lastQueueRefresh=Date.now();}
+  const result=await webplayer.queue({track:playback.track,refresh,cacheOnly:!refresh});session.check(snapshot);
+  const latest=host.playerState?.()??playback;
+  if(latest.track?.id!==playback.track.id||latest.playbackInstanceId!==playback.playbackInstanceId||
+     latest.currentIndex!==playback.currentIndex||!canImportQueue(latest))return;
   const ownedUpcoming=(result.tracks||[]).map(ownTrack);
-  const currentHostQueueIds=Array.isArray(playback.queue)&&Number.isInteger(playback.currentIndex)?playback.queue.slice(playback.currentIndex+1).map(t=>t.id):null;
+  const currentHostQueueIds=Array.isArray(latest.queue)&&Number.isInteger(latest.currentIndex)?latest.queue.slice(latest.currentIndex+1).map(t=>t.id):null;
   const upcomingIds=ownedUpcoming.map(t=>t.id);
   const hostMatches=currentHostQueueIds==null||(currentHostQueueIds.length===upcomingIds.length&&currentHostQueueIds.every((id,i)=>id===upcomingIds[i]));
   const key=JSON.stringify([occurrence,result.current?.id,result.contextUri,upcomingIds]);
-  if(result.complete&&result.current&&(key!==lastQueueKey||!hostMatches)){await host.replaceUpcomingQueue(ownedUpcoming);lastQueueOccurrence=occurrence;lastQueueKey=key;}
+  if(result.complete&&result.current&&(key!==lastQueueKey||!hostMatches)){
+    await host.replaceUpcomingQueue(ownedUpcoming);
+    importedQueue=Array.isArray(latest.queue)&&Number.isInteger(latest.currentIndex)
+      ?[...latest.queue.slice(0,latest.currentIndex+1).map(t=>t.id),...upcomingIds]:null;
+    lastQueueKey=key;
+  }
 }
 
 globalThis.plugin={
@@ -38,9 +56,9 @@ globalThis.plugin={
     host=context;session=new SpotifySession(host);catalog=new SpotifyCatalog(session);webplayer=new SpotifyWebPlayer(session,catalog);
     host.login({request:async()=>loginRequest,ui:async()=>loginUi,
       login:async credentials=>{
-        session.clear();lastQueueOccurrence=null;lastQueueKey=null;lastQueueRefresh=0;catalog.canvasCache.clear();await webplayer.reset();
+        session.clear();lastQueueOccurrence=null;lastQueueKey=null;lastQueueRefresh=0;importedQueue=null;catalog.canvasCache.clear();await webplayer.reset();
         const state=await session.verify(credentials?.values?.cookie);host.loginState(state);return state;
-      },logout:async()=>{session.clear();lastQueueOccurrence=null;lastQueueKey=null;lastQueueRefresh=0;catalog.canvasCache.clear();await webplayer.reset();host.loginState({loggedIn:false});}});
+      },logout:async()=>{session.clear();lastQueueOccurrence=null;lastQueueKey=null;lastQueueRefresh=0;importedQueue=null;catalog.canvasCache.clear();await webplayer.reset();host.loginState({loggedIn:false});}});
     host.home(()=>catalog.home());host.search('spotify.search',request=>catalog.search(request.query,request.limit));
     host.catalog('spotify.catalog',{album:id=>catalog.album(id),artist:id=>catalog.artist(id),playlist:id=>catalog.playlist(id),library:request=>catalog.library(request),supportsLikedSongs:true,setSongVote:request=>catalog.liked(request),
       recommendations:request=>webplayer.enqueue(()=>webplayer.queue(request))});
@@ -59,5 +77,5 @@ globalThis.plugin={
     host.service('spotify.queue/v1',request=>webplayer.enqueue(()=>webplayer.queue(request)));
     unsubscribe=host.on('playback_changed',playback=>{const revision=session.revision;return webplayer.enqueue(()=>playbackChanged(playback,revision)).catch(()=>{});});
   },
-  async dispose(){unsubscribe?.();unsubscribe=null;session?.clear();await webplayer?.stop();catalog?.canvasCache.clear();lastQueueOccurrence=null;lastQueueKey=null;lastQueueRefresh=0;}
+  async dispose(){unsubscribe?.();unsubscribe=null;session?.clear();await webplayer?.stop();catalog?.canvasCache.clear();lastQueueOccurrence=null;lastQueueKey=null;lastQueueRefresh=0;importedQueue=null;}
 };

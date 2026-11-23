@@ -16,9 +16,19 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.math.abs
+
+private val spotifyPlaylistContext = Regex("spotify:(?:(?:user:[^:]+:)?playlist:.+|playlist-format:.+|collection:tracks)", RegexOption.IGNORE_CASE)
+
+internal fun isSpotifyPlaylistContext(uri: String?): Boolean = uri != null && spotifyPlaylistContext.matches(uri)
+
+internal fun canImportSpotifyQueue(playback: PlaybackState, importedQueue: List<String>?): Boolean =
+    !isSpotifyPlaylistContext(playback.track.extras["spotify.contextUri"]) &&
+        (playback.queue.size <= 1 || playback.queue.map(Track::id) == importedQueue)
 
 internal interface HistoryActions {
     fun start(
@@ -121,12 +131,14 @@ internal class SpotifyPlaybackHistory(
     private var protocolScope: CoroutineScope? = null
     private var manager: SpotifyListeningHistoryManager? = null
     private var observer: PlaybackHistoryObserver? = null
+    private val queueMutex = Mutex()
+    private var importedQueue: List<String>? = null
 
     init {
-        SpotifyCanvasClient.setClusterUpdateListener {
+        SpotifyCanvasClient.setClusterUpdateListener { trackId ->
             accountScope.launch {
                 val snapshot = context.player.state.value
-                if (queueSyncEnabled() && snapshot.track.id.isNotBlank()) {
+                if (queueSyncEnabled() && snapshot.track.legacy().id.substringAfterLast(':') == trackId) {
                     synchronizeQueue(snapshot, refresh = false)
                 }
             }
@@ -215,9 +227,11 @@ internal class SpotifyPlaybackHistory(
     private suspend fun synchronizeQueue(
         snapshot: PlaybackState,
         refresh: Boolean = true,
-    ) {
-        val player = context.player as? UpcomingQueuePlayer ?: return
-        if ("replaceUpcomingQueue" !in player.capabilities || !queueSyncEnabled() || snapshot.track.id.isBlank()) return
+    ) = queueMutex.withLock {
+        val player = context.player as? UpcomingQueuePlayer ?: return@withLock
+        if ("replaceUpcomingQueue" !in player.capabilities || !queueSyncEnabled() || snapshot.track.id.isBlank() ||
+            !canImportSpotifyQueue(snapshot, importedQueue)
+        ) return@withLock
         val tracks =
             try {
                 SpotifyCanvasClient.resolveWebPlayerQueue(snapshot.track.legacy(), cookie, refresh = refresh)
@@ -225,12 +239,19 @@ internal class SpotifyPlaybackHistory(
                 throw error
             } catch (error: Exception) {
                 null
-            } ?: return
+            } ?: return@withLock
         val value = context.player.state.value
-        if (!queueSyncEnabled() || value.playbackInstanceId != snapshot.playbackInstanceId || value.track.id != snapshot.track.id) return
-        val current = value.currentIndex ?: return
+        if (!queueSyncEnabled() || value.playbackInstanceId != snapshot.playbackInstanceId ||
+            value.track.id != snapshot.track.id || value.currentIndex != snapshot.currentIndex ||
+            !canImportSpotifyQueue(value, importedQueue)
+        ) return@withLock
+        val current = value.currentIndex ?: return@withLock
         val upcoming = tracks.map { it.track().owned() }
-        if (value.queue.drop(current + 1).map(Track::id) != upcoming.map(Track::id)) player.replaceUpcomingQueue(upcoming)
+        val ids = upcoming.map(Track::id)
+        if (value.queue.drop(current + 1).map(Track::id) != ids) {
+            player.replaceUpcomingQueue(upcoming)
+            importedQueue = value.queue.take(current + 1).map(Track::id) + ids
+        }
     }
 
     private fun queueSyncEnabled(): Boolean =

@@ -6,6 +6,7 @@
 package dev.metrofuse.spotify.legacy
 
 import dev.metrofuse.spotify.bestSpotifyImageUrl
+import dev.metrofuse.spotify.isSpotifyPlaylistContext
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -434,6 +435,7 @@ object SpotifyCanvasClient {
     private val externalPlaylistCache = ConcurrentHashMap<String, CachedValue<ExternalPlaylistPage>>()
     private val recommendationCache = ConcurrentHashMap<String, CachedValue<List<SongItem>>>()
     private val webPlayerAutoplayQueueCache = ConcurrentHashMap<String, CachedValue<List<CachedSpotifyAutoplayTrack>>>()
+    private val spotifyUpcomingQueueCache = ConcurrentHashMap<String, CachedValue<List<CachedSpotifyAutoplayTrack>>>()
     private val webPlayerAutoplayQueueRefreshMutex = Mutex()
     private val artistPageMetadataCache = ConcurrentHashMap<String, CachedValue<SpotifyArtistPageMetadata>>()
 
@@ -794,6 +796,7 @@ object SpotifyCanvasClient {
         listeningHistoryBlockedUntilMs = 0
         listeningHistorySessions.clear()
         webPlayerAutoplayQueueCache.clear()
+        spotifyUpcomingQueueCache.clear()
         homePageCache.clear()
         libraryPageCache.clear()
         externalPlaylistCache.clear()
@@ -809,6 +812,7 @@ object SpotifyCanvasClient {
         listeningHistoryDeviceMutex.withLock { clearListeningHistoryDevice() }
         listeningHistorySessions.clear()
         webPlayerAutoplayQueueCache.clear()
+        spotifyUpcomingQueueCache.clear()
     }
 
     suspend fun resolveWebPlayerQueue(
@@ -821,29 +825,40 @@ object SpotifyCanvasClient {
         val uri = resolveTrackUriForHistory(metadata, normalized) ?: return null
         val id = uri.spotifyTrackId() ?: return null
         if (refresh) {
-            webPlayerAutoplayQueueRefreshMutex.withLock {
-                val token = ensureWebToken(normalized)
-                val device = ensureListeningHistoryDevice(normalized, token, SPOTIFY_HISTORY_DEVICE_NAME) ?: return@withLock
-                val clusterOk = cacheSpotifyConnectClusterQueueFromEndpoint(normalized, token, device.webgateUrl, id, attempts = 2)
-                if (!clusterOk) {
-                    val existing =
-                        webPlayerAutoplayQueueCache[id]
-                            ?.takeIf { System.currentTimeMillis() - it.cachedAt < SPOTIFY_WEB_PLAYER_QUEUE_CACHE_TTL_MS }
-                    if (existing == null) {
-                        requestListeningHistoryPlaybackState(normalized, token, uri, null, device)
-                    }
+            val matched = webPlayerAutoplayQueueRefreshMutex.withLock {
+                val fullQueue = readSpotifyPlayer("/queue", normalized)
+                if (fullQueue != null && cacheSpotifyWebApiQueue(fullQueue, id)) return@withLock true
+                val remoteId = fullQueue?.obj("currently_playing")?.spotifyStateMachineTrackId()
+                if (fullQueue?.get("currently_playing") == JsonNull || (remoteId != null && remoteId != id)) {
+                    spotifyUpcomingQueueCache.remove(id)
+                    return@withLock false
                 }
+                val token = ensureWebToken(normalized)
+                val device = ensureListeningHistoryDevice(normalized, token, SPOTIFY_HISTORY_DEVICE_NAME) ?: return@withLock false
+                cacheSpotifyConnectClusterQueueFromEndpoint(normalized, token, device.webgateUrl, id, attempts = 2)
             }
+            if (!matched) return null
         }
-        val cached = webPlayerAutoplayQueueCache[id] ?: return null
+        val cached = spotifyUpcomingQueueCache[id] ?: return null
         if (System.currentTimeMillis() - cached.cachedAt >= SPOTIFY_WEB_PLAYER_QUEUE_CACHE_TTL_MS) return null
         if (cached.value.size > limit.coerceIn(1, 1000)) return null
-        val tracks = resolveCachedWebPlayerAutoplayRecommendations(id, normalized, limit.coerceIn(1, 1000))
+        val tracks = hydrateSpotifyQueue(cached.value, normalized)
         return tracks.takeIf { it.size == cached.value.size }
     }
 
-    internal suspend fun cachedWebPlayerQueue(trackId: String): List<SongItem>? =
-        if (webPlayerAutoplayQueueCache.containsKey(trackId)) resolveCachedWebPlayerAutoplayRecommendations(trackId, "", 1000) else null
+    internal suspend fun cachedWebPlayerQueue(trackId: String): List<SongItem>? {
+        val queue = spotifyUpcomingQueueCache[trackId] ?: webPlayerAutoplayQueueCache[trackId] ?: return null
+        return hydrateSpotifyQueue(queue.value, "")
+    }
+
+    private suspend fun readSpotifyPlayer(path: String, cookie: String): JsonObject? =
+        try {
+            spotifyApiGet("https://api.spotify.com/v1/me/player$path".toHttpUrl(), cookie, "Spotify player")
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            null
+        }
 
     suspend fun resolveTrackMetadata(
         trackIdOrUri: String,
@@ -1839,6 +1854,20 @@ object SpotifyCanvasClient {
         playbackContextUri: String? = null,
         device: SpotifyListeningHistoryDevice,
     ): SpotifyListeningHistoryPlaybackState? = device.commandMutex.withLock {
+        val active = readSpotifyPlayer("", normalizedCookie)
+        if (active == null) {
+            val cluster = readSpotifyConnectCluster(normalizedCookie, webToken, device.webgateUrl)
+            val state = cluster?.obj("player_state")
+            if (cluster?.string("active_device_id") != device.deviceId &&
+                isSpotifyPlaylistContext(state?.string("context_uri") ?: state?.obj("context")?.string("uri"))
+            ) return@withLock null
+        } else {
+            val context = active.obj("context")
+            if (active.obj("device")?.string("id") != device.deviceId &&
+                (context?.string("type") == "playlist" || isSpotifyPlaylistContext(context?.string("uri")))
+            ) return@withLock null
+        }
+
         val trackId = trackUri.spotifyTrackId()
         val stationUri = trackId?.let { "spotify:station:track:$it" }
         val resolvedPlaybackContextUri =
@@ -1861,8 +1890,10 @@ object SpotifyCanvasClient {
         val contextUris =
             buildList {
                 resolvedPlaybackContextUri?.let { add(it) }
-                add(trackUri)
-                stationUri?.let { add(it) }
+                if (!isSpotifyPlaylistContext(playbackContextUri)) {
+                    add(trackUri)
+                    stationUri?.let { add(it) }
+                }
             }.distinct()
 
         for ((index, contextUri) in contextUris.withIndex()) {
@@ -2556,12 +2587,11 @@ object SpotifyCanvasClient {
     ): Boolean {
         repeat(attempts.coerceAtLeast(1)) { attempt ->
             if (
-                fetchSpotifyConnectClusterQueue(
+                readSpotifyConnectCluster(
                     normalizedCookie = normalizedCookie,
                     webToken = webToken,
                     webgateUrl = webgateUrl,
-                    expectedCurrentTrackId = expectedCurrentTrackId,
-                )
+                )?.let { cacheSpotifyConnectClusterQueue(it, expectedCurrentTrackId) } == true
             ) {
                 return true
             }
@@ -2570,12 +2600,11 @@ object SpotifyCanvasClient {
         return false
     }
 
-    private suspend fun fetchSpotifyConnectClusterQueue(
+    private suspend fun readSpotifyConnectCluster(
         normalizedCookie: String,
         webToken: String,
         webgateUrl: String,
-        expectedCurrentTrackId: String,
-    ): Boolean {
+    ): JsonObject? {
         val resolvedClientToken = ensureClientTokenBestEffort(normalizedCookie)
         return withContext(Dispatchers.IO) {
             val request =
@@ -2606,14 +2635,13 @@ object SpotifyCanvasClient {
                         )
                     }
 
-                    cacheSpotifyConnectClusterQueue(
-                        cluster = json.parseToJsonElement(body).jsonObject,
-                        expectedCurrentTrackId = expectedCurrentTrackId,
-                    )
+                    val root = json.parseToJsonElement(body).jsonObject
+                    root.obj("cluster") ?: root
                 }
             }.onFailure { error ->
+                if (error is CancellationException) throw error
                 Timber.w(error, "Spotify Connect cluster fetch failed")
-            }.getOrDefault(false)
+            }.getOrNull()
         }
     }
 
@@ -2634,7 +2662,29 @@ object SpotifyCanvasClient {
         val nextTracks = upcoming.mapNotNull { it.obj?.toCachedSpotifyConnectQueueTrack() }
         if (nextTracks.size != upcoming.size) return false
 
-        webPlayerAutoplayQueueCache[currentTrackId] = CachedValue(nextTracks, System.currentTimeMillis())
+        val now = System.currentTimeMillis()
+        val queue = spotifyUpcomingQueueCache.compute(currentTrackId) { _, previous ->
+            if (previous != null && nextTracks.isNotEmpty() && nextTracks.size < previous.value.size &&
+                now - previous.cachedAt < 60_000 &&
+                nextTracks.indices.all { nextTracks[it].trackId == previous.value[it].trackId }
+            ) previous else CachedValue(nextTracks, now)
+        }
+        if (queue != null) webPlayerAutoplayQueueCache[currentTrackId] = queue
+        return true
+    }
+
+    internal fun cacheSpotifyWebApiQueue(root: JsonObject, expectedCurrentTrackId: String): Boolean {
+        val current = root.obj("currently_playing") ?: return false
+        if (current.string("type") == "episode" || current.spotifyStateMachineTrackId() != expectedCurrentTrackId) return false
+        val upcoming = root.array("queue") ?: return false
+        if (upcoming.size > 1000) return false
+        val tracks = upcoming.map { entry ->
+            val item = entry.obj ?: return false
+            if (item.string("type") == "episode" || item.boolean("is_local")) return false
+            val id = item.spotifyStateMachineTrackId() ?: return false
+            CachedSpotifyAutoplayTrack(id, item.toSpotifyPlaylistSong() ?: return false)
+        }
+        spotifyUpcomingQueueCache[expectedCurrentTrackId] = CachedValue(tracks, System.currentTimeMillis())
         return true
     }
 
@@ -3512,8 +3562,13 @@ object SpotifyCanvasClient {
                 ?.value
                 ?.take(limit)
                 .orEmpty()
-        if (cachedTracks.isEmpty()) return emptyList()
+        return hydrateSpotifyQueue(cachedTracks, normalizedCookie)
+    }
 
+    private suspend fun hydrateSpotifyQueue(
+        cachedTracks: List<CachedSpotifyAutoplayTrack>,
+        normalizedCookie: String,
+    ): List<SongItem> {
         val incompleteTrackIds =
             cachedTracks
                 .filter { track ->
@@ -3537,8 +3592,7 @@ object SpotifyCanvasClient {
             .asSequence()
             .mapNotNull { track ->
                 track.song.mergeWithHydratedSpotifyTrack(hydrated[track.trackId])
-            }.take(limit)
-            .toList()
+            }.toList()
     }
 
     private fun SongItem?.mergeWithHydratedSpotifyTrack(hydrated: SongItem?): SongItem? {

@@ -336,6 +336,49 @@ class SpotifyProtocolTest {
         assertEquals(external, song.copy(thumbnail = external).track().artwork)
     }
 
+    @Test fun fullWebApiQueueKeepsOrderedOccurrencesWhenConnectOnlyReturnsOneTrack() = runBlocking {
+        val nextId = "0000000000000000000002"
+        fun entry(id: String) = buildJsonObject {
+            put("id", id)
+            put("uri", "spotify:track:$id")
+            put("name", "Fixture")
+            put("type", "track")
+            putJsonArray("artists") { addJsonObject { put("name", "Artist") } }
+            putJsonObject("album") {
+                putJsonArray("images") { addJsonObject { put("url", "https://i.scdn.co/image/fixture") } }
+            }
+        }
+        val full = buildJsonObject {
+            put("currently_playing", entry(first))
+            putJsonArray("queue") { add(entry(nextId)); add(entry(nextId)); add(entry(first)) }
+        }
+        val preview = buildJsonObject {
+            putJsonObject("player_state") {
+                put("track", entry(first))
+                putJsonArray("next_tracks") { add(entry(nextId)) }
+            }
+        }
+        try {
+            assertFalse(SpotifyCanvasClient.cacheSpotifyWebApiQueue(full, nextId))
+            assertTrue(SpotifyCanvasClient.cacheSpotifyWebApiQueue(full, first))
+            assertTrue(SpotifyCanvasClient.cacheSpotifyConnectClusterQueue(preview, first))
+            assertEquals(listOf(nextId, nextId, first), SpotifyCanvasClient.cachedWebPlayerQueue(first)?.map { it.id.substringAfterLast(':') })
+        } finally {
+            SpotifyCanvasClient.stopWebPlayerHistory()
+        }
+    }
+
+    @Test fun queueSyncPreservesPlaylistAndExistingLocalQueue() {
+        val track = Track("spotify:track:$first", "Fixture", "Artist", "")
+        val next = track.copy(id = "another")
+        val playback = PlaybackState(track, true, 0, listOf(track, next))
+        assertFalse(canImportSpotifyQueue(playback, null))
+        assertTrue(canImportSpotifyQueue(playback, playback.queue.map(Track::id)))
+        val playlistTrack = track.copy(extras = mapOf("spotify.contextUri" to "spotify:playlist:fixture"))
+        assertFalse(canImportSpotifyQueue(PlaybackState(playlistTrack, true, 0, listOf(playlistTrack)), null))
+        assertTrue(canImportSpotifyQueue(PlaybackState(track, true, 0, listOf(track)), null))
+    }
+
     @Test fun publishedPlaybackStateConstructorAndCopyDescriptorsRemainAvailable() {
         val constructor =
             PlaybackState::class.java.getConstructor(

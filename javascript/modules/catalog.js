@@ -49,7 +49,9 @@ export function artist(value,tracks=[],albums=[]) {
 }
 export function playlist(value,tracks=[]) {
   value=unwrap(value);const raw=value?.uri??value?.id,id=entityId(raw,'playlist'),title=name(value);if(!id||typeof title!=='string')return null;
-  return {id:'spotify:playlist:'+id,title,author:value.owner?.display_name??value.owner?.name??value.ownerV2?.data?.name??'',artwork:picture(value),tracks,
+  const contextUri='spotify:playlist:'+id;
+  return {id:contextUri,title,author:value.owner?.display_name??value.owner?.name??value.ownerV2?.data?.name??'',artwork:picture(value),
+    tracks:tracks.map(item=>({...item,extras:{...item.extras,'spotify.contextUri':contextUri}})),
     metadata:{description:value.description??'',trackCount:value.tracks?.total??value.content?.totalCount,owner:value.owner??value.ownerV2?.data,editable:value.canEdit??false,spotify:value}};
 }
 export function homeItem(value) {
@@ -141,7 +143,7 @@ export class SpotifyCatalog {
   async playlist(id) {
     if(['spotify:collection:tracks','collection:tracks','tracks'].includes(id)) {
       const snapshot=this.session.snapshot(),items=[];let continuation;for(let page=0;page<200;page++){const result=await this.library({likedSongsOnly:true,continuation});this.session.check(snapshot);items.push(...result.items.map(v=>v.track).filter(Boolean));continuation=result.continuation;if(!continuation)break;}
-      return {id:'spotify:collection:tracks',title:'Liked Songs',author:'Spotify',artwork:items[0]?.artwork??'',tracks:items.map(t=>({...t,extras:{...t.extras,likeStatus:'LIKE'}}))};
+      return {id:'spotify:collection:tracks',title:'Liked Songs',author:'Spotify',artwork:items[0]?.artwork??'',tracks:items.map(t=>({...t,extras:{...t.extras,likeStatus:'LIKE','spotify.contextUri':'spotify:collection:tracks'}}))};
     }
     id=entityId(id,'playlist');if(!id)return null;const snapshot=this.session.snapshot();
     try {
