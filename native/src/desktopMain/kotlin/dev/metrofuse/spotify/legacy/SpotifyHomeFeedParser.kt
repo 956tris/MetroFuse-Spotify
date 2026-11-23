@@ -1,5 +1,6 @@
 /** Ported from MetroFuse, GPL-3.0. See SOURCE for provenance. */
 package dev.metrofuse.spotify.legacy
+import dev.metrofuse.spotify.bestSpotifyImageUrl
 import kotlinx.serialization.json.*
 import java.net.URLDecoder
 import dev.metrofuse.spotify.legacy.Album as TubeAlbum
@@ -219,8 +220,7 @@ object SpotifyHomeFeedParser {
             ?.let { return it }
 
         array("sources")
-            ?.mapNotNull { it.obj?.string("url") }
-            ?.firstOrNull { it.startsWith("http", ignoreCase = true) }
+            ?.bestSpotifyImageUrl()
             ?.let { return it }
 
         array("items")

@@ -23,7 +23,8 @@ export function machineTrack(value) {
   const id=machineTrackId(value);if(!id)return null;const meta=value.metadata??value;
   const artists=Array.isArray(meta.artists)?meta.artists:Array.isArray(value.artists)?value.artists:[{name:meta.artist_name??meta.artist??meta.artistName}].filter(x=>x.name);
   const album={name:meta.group_name??meta.album_name??meta.albumName??meta.album??value.album?.name??'',uri:meta.group_uri??meta.album_uri??value.album?.uri,
-    images:[{url:meta.image_url??meta.imageUrl??meta.image??meta.cover_url??value.album?.images?.[0]?.url??''}]};
+    coverArt:value.album?.coverArt,
+    images:[...(Array.isArray(value.album?.images)?value.album.images:[]),{url:meta.image_url??meta.imageUrl??meta.image??meta.cover_url}]};
   const duration=Number(meta.duration??meta.duration_ms??value.duration_ms??0);
   return track({uri:'spotify:track:'+id,name:meta.name??meta.title??value.name??value.title,artists,album,duration_ms:duration,explicit:meta.is_explicit===true||meta.explicit===true||meta.explicit==='true'});
 }

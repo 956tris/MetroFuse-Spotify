@@ -20,7 +20,7 @@ internal fun SongItem.track(contextUri: String? = null): Track =
         artists.joinToString(", ") { it.name },
         album?.name.orEmpty(),
         duration?.times(1000L) ?: 0,
-        thumbnail,
+        thumbnail.spotifyCoverUrl(),
         buildMap {
             put("provider", "spotify")
             contextUri?.let { put("spotify.contextUri", it) }
@@ -31,12 +31,12 @@ internal fun SongItem.track(contextUri: String? = null): Track =
         },
     )
 
-internal fun AlbumItem.album() = CatalogAlbum(id, title, artists.orEmpty().joinToString(", ") { it.name }, thumbnail)
+internal fun AlbumItem.album() = CatalogAlbum(id, title, artists.orEmpty().joinToString(", ") { it.name }, thumbnail.spotifyCoverUrl())
 
-internal fun ArtistItem.artist() = CatalogArtist(id, title, thumbnail.orEmpty())
+internal fun ArtistItem.artist() = CatalogArtist(id, title, thumbnail.orEmpty().spotifyCoverUrl())
 
 internal fun PlaylistItem.playlist(tracks: List<Track> = emptyList()) =
-    CatalogPlaylist(id, title, author?.name.orEmpty(), thumbnail.orEmpty(), tracks)
+    CatalogPlaylist(id, title, author?.name.orEmpty(), thumbnail.orEmpty().spotifyCoverUrl(), tracks)
 
 internal fun YTItem.item(): HomeItem =
     when (this) {

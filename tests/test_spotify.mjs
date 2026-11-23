@@ -18,6 +18,22 @@ test('protobuf roundtrip and truncation rejection',()=>{const bytes=protoBytes(1
 test('cookie input rejects injection and keeps only Spotify cookies',()=>{assert.equal(cookieInput('sp_dc=abc; other=secret; sp_t=xyz'),'sp_dc=abc; sp_t=xyz');for(const value of ['sp_t=only','sp_dc=abc\r\nX: bad','sp_dc=a\0b'])assert.throws(()=>cookieInput(value));});
 test('REST metadata keeps factual ISRC, IDs and milliseconds',()=>{const value=track(raw());assert.equal(value.duration,180000);assert.equal(value.extras.isrc,'USAAA0000001');assert.equal(value.extras.explicit,'true');assert.equal(JSON.parse(value.extras['spotify.metadata']).name,'One');assert.equal(album(raw().album).title,'Album');assert.equal(artist(raw().artists[0]).name,'Artist');});
 test('GraphQL wrapped tracks retain library _uri',()=>{const value=track({track:{_uri:URI,data:{...raw(),id:undefined}}});assert.equal(value.id,URI);});
+test('Spotify artwork picks the largest valid source and upgrades standalone album covers', () => {
+  const small = 'ab67616d000048518863bc11d2aa12b54f5aeb36';
+  const large = 'https://i.scdn.co/image/ab67616d0000b2738863bc11d2aa12b54f5aeb36';
+  const sources = [
+    {url: 'https://i.scdn.co/image/small', width: 64},
+    {url: '', width: 1000},
+    {url: large, height: 640},
+  ];
+  const albumValue = {...raw().album, images: [], coverArt: {sources}};
+  assert.equal(track({...raw(), album: albumValue}).artwork, large);
+  assert.equal(album(albumValue).artwork, large);
+  assert.equal(playlist({id: ID, name: 'Playlist', images: {items: [{sources}]}}).artwork, large);
+  assert.equal(machineTrack({uri: URI, metadata: {name: 'One', image_url: 'spotify:image:' + small}}).artwork, large);
+  const external = 'https://example.com/image/' + small;
+  assert.equal(album({...albumValue, coverArt: {sources: [{url: external}]}}).artwork, external);
+});
 test('metadata matching rejects wrong artist and wrong duration',()=>{const candidate=track(raw());assert.equal(matchTrack([candidate],{title:'One',artist:'Unrelated',duration:180000}),null);assert.equal(matchTrack([candidate],{title:'One',artist:'Artist',duration:220000}),null);assert.equal(matchTrack([candidate],{isrc:'US-AAA-00-00001'}),candidate);});
 test('metadata and lyrics providers skip requests while signed out',async()=>{
   await import('../javascript/index.js');

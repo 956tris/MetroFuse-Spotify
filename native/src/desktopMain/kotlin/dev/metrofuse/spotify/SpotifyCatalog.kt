@@ -49,7 +49,7 @@ internal class SpotifyCatalog(
                     page.playlist.author
                         ?.name
                         .orEmpty(),
-                    page.playlist.thumbnail.orEmpty(),
+                    page.playlist.thumbnail.orEmpty().spotifyCoverUrl(),
                     page.songs.map {
                         it.track(page.playlist.id)
                     },
@@ -64,7 +64,7 @@ internal class SpotifyCatalog(
             CatalogArtist(
                 page.playlist.id,
                 page.playlist.title,
-                page.playlist.thumbnail.orEmpty(),
+                page.playlist.thumbnail.orEmpty().spotifyCoverUrl(),
                 page.songs.map {
                     it.track()
                 },

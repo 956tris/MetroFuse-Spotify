@@ -5,6 +5,8 @@
 
 package dev.metrofuse.spotify.legacy
 
+import dev.metrofuse.spotify.bestSpotifyImageUrl
+
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -5470,14 +5472,8 @@ object SpotifyCanvasClient {
         )
     }
 
-    /** Picks the largest `sources[]` entry (by width) from a `coverArt`/`avatarImage`-shaped object. */
     private fun spotifyLargestSource(container: JsonObject?): String? =
-        container
-            ?.array("sources")
-            .orEmpty()
-            .mapNotNull { it.obj }
-            .maxByOrNull { it.long("width") ?: 0L }
-            ?.string("url")
+        container?.array("sources")?.bestSpotifyImageUrl()
 
     private fun tokenOverlapScore(
         expected: String,
@@ -9354,11 +9350,7 @@ object SpotifyCanvasClient {
     }
 
     private fun JsonObject.spotifyWebApiImageUrl(): String? =
-        array("images")
-            .orEmpty()
-            .firstNotNullOfOrNull { image ->
-                image.obj?.string("url")
-            }
+        array("images")?.bestSpotifyImageUrl()
 
     private fun JsonObject.spotifyArtistImageUrl(): String? =
         listOf(
@@ -9467,10 +9459,8 @@ object SpotifyCanvasClient {
             ?.takeIf { it.startsWith("http", ignoreCase = true) }
             ?.let { return it }
 
-        array("sources")
-            ?.firstNotNullOfOrNull { image ->
-                image.obj?.string("url")?.takeIf { it.startsWith("http", ignoreCase = true) }
-            }?.let { return it }
+        array("sources")?.bestSpotifyImageUrl()?.let { return it }
+        array("images")?.bestSpotifyImageUrl()?.let { return it }
 
         array("items")
             ?.firstNotNullOfOrNull { item ->

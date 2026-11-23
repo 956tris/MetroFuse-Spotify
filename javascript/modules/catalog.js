@@ -11,8 +11,19 @@ export function identityId(identity,type='track') {
   return entityId(identity?.identifiers?.spotify,type)??entityId(identity?.identifiers?.['spotify.'+type],type)??entityId(identity?.canonicalId,type);
 }
 const name=x=>x?.profile?.name??x?.name??x?.title;
-const picture=x=>[...arr(x?.images),...arr(x?.images).flatMap(i=>arr(i?.sources)),...arr(x?.coverArt?.sources),...arr(x?.visuals?.avatarImage?.sources),...arr(x?.visuals?.headerImage?.sources)]
-  .filter(i=>typeof i?.url==='string').sort((a,b)=>(b.width??0)-(a.width??0))[0]?.url??'';
+function coverUrl(url) {
+  const resolved = url.replace(/^spotify:image:([a-f0-9]{40})$/i, 'https://i.scdn.co/image/$1');
+  // Album covers use the same image ID suffix at 64, 300 and 640 px.
+  return resolved.replace(/^(https:\/\/(?:i\.scdn\.co|image-cdn-fa\.spotifycdn\.com)\/image\/ab67616d0000)(?:1e02|4851)([a-f0-9]{24})$/i, '$1b273$2');
+}
+
+function picture(x) {
+  const images = [...arr(x?.images), ...arr(x?.images).flatMap(i=>arr(i?.sources)), ...arr(x?.coverArt?.sources),
+    ...arr(x?.visuals?.avatarImage?.sources), ...arr(x?.visuals?.headerImage?.sources)];
+  const best = images.filter(i=>typeof i?.url==='string'&&i.url.trim())
+    .sort((a,b)=>(b.width??b.height??0)-(a.width??a.height??0))[0];
+  return best ? coverUrl(best.url) : '';
+}
 export function track(value) {
   value=unwrap(value);if(!value||value.is_local)return null;
   const id=entityId(value.uri??value.id),title=name(value);if(!id||typeof title!=='string'||!title.trim())return null;

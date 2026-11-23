@@ -13,6 +13,7 @@ import dev.metrofuse.spotify.legacy.Artist
 import dev.metrofuse.spotify.legacy.MediaMetadata
 import dev.metrofuse.spotify.legacy.SongItem
 import dev.metrofuse.spotify.legacy.SpotifyCanvasClient
+import dev.metrofuse.spotify.legacy.SpotifyHomeFeedParser
 import dev.metrofuse.spotify.legacy.normalizeSpotifyCookieInput
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
@@ -306,6 +307,33 @@ class SpotifyProtocolTest {
         assertEquals("sp_dc=fixture-session; sp_t=fixture-personalization", normalized)
         assertNull(normalizeSpotifyCookieInput("sp_t=fixture-personalization"))
         assertNull(normalizeSpotifyCookieInput("bad\r\nheader"))
+    }
+
+    @Test fun homeChoosesTheLargestCoverAndNativeTracksUpgradeStandaloneThumbnails() {
+        val largeCover = "https://i.scdn.co/image/ab67616d0000b2738863bc11d2aa12b54f5aeb36"
+        val home = Json.parseToJsonElement(
+            """
+            {"sections":[{"title":"Recommended","items":[{"data":{
+                "uri":"spotify:album:$first","name":"Album",
+                "coverArt":{"sources":[
+                    {"url":"https://i.scdn.co/image/small","width":64},
+                    {"url":"","width":1000},
+                    {"url":"$largeCover","height":640}
+                ]}
+            }}]}]}
+            """.trimIndent(),
+        ).jsonObject
+        assertEquals(largeCover, SpotifyHomeFeedParser.parse(home).shelves().single().items.single().album?.artwork)
+
+        val song = SongItem(
+            "spotify:track:$first",
+            "Fixture",
+            listOf(Artist("Artist")),
+            thumbnail = "spotify:image:ab67616d000048518863bc11d2aa12b54f5aeb36",
+        )
+        assertEquals(largeCover, song.track().artwork)
+        val external = "https://example.com/image/ab67616d000048518863bc11d2aa12b54f5aeb36"
+        assertEquals(external, song.copy(thumbnail = external).track().artwork)
     }
 
     @Test fun publishedPlaybackStateConstructorAndCopyDescriptorsRemainAvailable() {
