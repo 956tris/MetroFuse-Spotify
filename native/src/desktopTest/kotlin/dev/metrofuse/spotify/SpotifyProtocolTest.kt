@@ -379,6 +379,21 @@ class SpotifyProtocolTest {
         assertTrue(canImportSpotifyQueue(PlaybackState(track, true, 0, listOf(track)), null))
     }
 
+    @Test fun binaryQueueMetadataDecodesDurationArtistAndExplicitFlag() {
+        val track = byteArrayOf(
+            0x12, 0x04, 'S'.code.toByte(), 'o'.code.toByte(), 'n'.code.toByte(), 'g'.code.toByte(),
+            0x22, 0x05, 0x12, 0x03, 'A'.code.toByte(), 'c'.code.toByte(), 't'.code.toByte(),
+            0x38, 0xc0.toByte(), 0xfc.toByte(), 0x15, 0x48, 0x01,
+        )
+        val song = assertNotNull(parseSpotifyQueueMetadata(first, track))
+        assertEquals("spotify:track:$first", song.id)
+        assertEquals("Song", song.title)
+        assertEquals(listOf(Artist("Act")), song.artists)
+        assertEquals(180, song.duration)
+        assertTrue(song.explicit)
+        assertEquals("0000000000000000000000000000000a", spotifyMetadataGid("000000000000000000000a"))
+    }
+
     @Test fun publishedPlaybackStateConstructorAndCopyDescriptorsRemainAvailable() {
         val constructor =
             PlaybackState::class.java.getConstructor(

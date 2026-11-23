@@ -131,7 +131,7 @@ jobs:
 
           Spotify album and track covers now use higher-resolution artwork in both native and JavaScript plugins.
 
-          Queue sync reads Spotify's full upcoming list when available, preserves duplicate tracks, and leaves an existing MetroFuse playlist in place. Listening history respects playlist context and avoids taking over an active Spotify playlist on another device.
+          Queue sync reads Spotify Connect directly and resolves ID-only entries through Spotify's internal metadata endpoint. It preserves duplicate tracks and leaves an existing MetroFuse playlist in place. Listening history checks Connect for an active playlist before sending playback commands.
 
           The Android sign-in flow uses the host SDK's browser and cookie handoff. Native listening history tracks playback when the host omits an occurrence ID and waits for Spotify to acknowledge playback start before reporting the listening threshold. Update to MetroFuse 10.0 Beta for the matching Android WebView implementation.
 

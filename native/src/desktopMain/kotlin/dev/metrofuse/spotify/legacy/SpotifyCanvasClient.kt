@@ -7,6 +7,8 @@ package dev.metrofuse.spotify.legacy
 
 import dev.metrofuse.spotify.bestSpotifyImageUrl
 import dev.metrofuse.spotify.isSpotifyPlaylistContext
+import dev.metrofuse.spotify.parseSpotifyQueueMetadata
+import dev.metrofuse.spotify.spotifyMetadataGid
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -333,6 +335,7 @@ object SpotifyCanvasClient {
     private const val LIBRARY_ITEM_SAFETY_LIMIT = 1_000
     private const val WEB_PLAYER_URL = "https://open.spotify.com/"
     private const val SPOTIFY_APRESOLVE_URL = "https://apresolve.spotify.com/?type=dealer-g2&type=spclient"
+    private val SPOTIFY_WEBGATE_HOST = Regex("""[-a-z0-9.]+\.spotify\.com(?::443)?""", RegexOption.IGNORE_CASE)
     private const val SPOTIFY_HISTORY_BATCH_URL = "https://gew1-spclient.spotify.com/melody/v1/msg/batch"
     private const val SPOTIFY_HISTORY_CLIENT_VERSION_FALLBACK = "0.0.0"
     private const val SPOTIFY_HISTORY_FINAL_CLIENT_VERSION = "0.0.0"
@@ -436,6 +439,8 @@ object SpotifyCanvasClient {
     private val recommendationCache = ConcurrentHashMap<String, CachedValue<List<SongItem>>>()
     private val webPlayerAutoplayQueueCache = ConcurrentHashMap<String, CachedValue<List<CachedSpotifyAutoplayTrack>>>()
     private val spotifyUpcomingQueueCache = ConcurrentHashMap<String, CachedValue<List<CachedSpotifyAutoplayTrack>>>()
+    private val spotifyQueueMetadata = ConcurrentHashMap<String, SongItem>()
+    @Volatile private var spotifyQueueWebgate: String? = null
     private val webPlayerAutoplayQueueRefreshMutex = Mutex()
     private val artistPageMetadataCache = ConcurrentHashMap<String, CachedValue<SpotifyArtistPageMetadata>>()
 
@@ -797,6 +802,8 @@ object SpotifyCanvasClient {
         listeningHistorySessions.clear()
         webPlayerAutoplayQueueCache.clear()
         spotifyUpcomingQueueCache.clear()
+        spotifyQueueMetadata.clear()
+        spotifyQueueWebgate = null
         homePageCache.clear()
         libraryPageCache.clear()
         externalPlaylistCache.clear()
@@ -813,6 +820,8 @@ object SpotifyCanvasClient {
         listeningHistorySessions.clear()
         webPlayerAutoplayQueueCache.clear()
         spotifyUpcomingQueueCache.clear()
+        spotifyQueueMetadata.clear()
+        spotifyQueueWebgate = null
     }
 
     suspend fun resolveWebPlayerQueue(
@@ -826,23 +835,28 @@ object SpotifyCanvasClient {
         val id = uri.spotifyTrackId() ?: return null
         if (refresh) {
             val matched = webPlayerAutoplayQueueRefreshMutex.withLock {
-                val fullQueue = readSpotifyPlayer("/queue", normalized)
-                if (fullQueue != null && cacheSpotifyWebApiQueue(fullQueue, id)) return@withLock true
-                val remoteId = fullQueue?.obj("currently_playing")?.spotifyStateMachineTrackId()
-                if (fullQueue?.get("currently_playing") == JsonNull || (remoteId != null && remoteId != id)) {
+                val webgate = listeningHistoryDevice?.webgateUrl ?: spotifyQueueWebgate
+                    ?: withContext(Dispatchers.IO) { fetchListeningHistoryEndpoints().webgateUrl }
+                spotifyQueueWebgate = webgate
+                val token = ensureWebToken(normalized)
+                val cluster = readSpotifyConnectCluster(normalized, token, webgate)
+                val currentTrackId = cluster?.obj("player_state")?.obj("track")?.spotifyStateMachineTrackId()
+                if (currentTrackId != null && currentTrackId != id) {
                     spotifyUpcomingQueueCache.remove(id)
                     return@withLock false
                 }
-                val token = ensureWebToken(normalized)
-                val device = ensureListeningHistoryDevice(normalized, token, SPOTIFY_HISTORY_DEVICE_NAME) ?: return@withLock false
-                cacheSpotifyConnectClusterQueueFromEndpoint(normalized, token, device.webgateUrl, id, attempts = 2)
+                if (cluster != null && cacheSpotifyConnectClusterQueue(cluster, id)) return@withLock true
+                val fullQueue = readSpotifyPlayer("/queue", normalized)
+                if (fullQueue != null && cacheSpotifyWebApiQueue(fullQueue, id)) return@withLock true
+                spotifyUpcomingQueueCache.remove(id)
+                false
             }
             if (!matched) return null
         }
         val cached = spotifyUpcomingQueueCache[id] ?: return null
         if (System.currentTimeMillis() - cached.cachedAt >= SPOTIFY_WEB_PLAYER_QUEUE_CACHE_TTL_MS) return null
         if (cached.value.size > limit.coerceIn(1, 1000)) return null
-        val tracks = hydrateSpotifyQueue(cached.value, normalized)
+        val tracks = hydrateSpotifyQueue(cached.value, normalized, spotifyQueueWebgate ?: listeningHistoryDevice?.webgateUrl)
         return tracks.takeIf { it.size == cached.value.size }
     }
 
@@ -1854,19 +1868,11 @@ object SpotifyCanvasClient {
         playbackContextUri: String? = null,
         device: SpotifyListeningHistoryDevice,
     ): SpotifyListeningHistoryPlaybackState? = device.commandMutex.withLock {
-        val active = readSpotifyPlayer("", normalizedCookie)
-        if (active == null) {
-            val cluster = readSpotifyConnectCluster(normalizedCookie, webToken, device.webgateUrl)
-            val state = cluster?.obj("player_state")
-            if (cluster?.string("active_device_id") != device.deviceId &&
-                isSpotifyPlaylistContext(state?.string("context_uri") ?: state?.obj("context")?.string("uri"))
-            ) return@withLock null
-        } else {
-            val context = active.obj("context")
-            if (active.obj("device")?.string("id") != device.deviceId &&
-                (context?.string("type") == "playlist" || isSpotifyPlaylistContext(context?.string("uri")))
-            ) return@withLock null
-        }
+        val cluster = readSpotifyConnectCluster(normalizedCookie, webToken, device.webgateUrl) ?: return@withLock null
+        val state = cluster.obj("player_state")
+        if (cluster.string("active_device_id") != device.deviceId &&
+            isSpotifyPlaylistContext(state?.string("context_uri") ?: state?.obj("context")?.string("uri"))
+        ) return@withLock null
 
         val trackId = trackUri.spotifyTrackId()
         val stationUri = trackId?.let { "spotify:station:track:$it" }
@@ -2133,6 +2139,7 @@ object SpotifyCanvasClient {
                     .array("spclient")
                     ?.firstOrNull()
                     ?.stringValueOrNull()
+                    ?.takeIf(SPOTIFY_WEBGATE_HOST::matches)
                     ?: "spclient.wg.spotify.com"
             return SpotifyListeningHistoryEndpoints(
                 dealerUrl = "wss://${dealerHost.removeSuffix(":443")}",
@@ -3568,6 +3575,7 @@ object SpotifyCanvasClient {
     private suspend fun hydrateSpotifyQueue(
         cachedTracks: List<CachedSpotifyAutoplayTrack>,
         normalizedCookie: String,
+        webgate: String? = null,
     ): List<SongItem> {
         val incompleteTrackIds =
             cachedTracks
@@ -3576,9 +3584,20 @@ object SpotifyCanvasClient {
                         track.song.title.isBlank() ||
                         track.song.thumbnail.isBlank() ||
                         track.song.artists.isEmpty()
-                }.map { it.trackId }
+                }.map { it.trackId }.distinct()
+        val internalTracks =
+            if (webgate == null || incompleteTrackIds.isEmpty()) emptyMap()
+            else {
+                val token = ensureWebToken(normalizedCookie)
+                incompleteTrackIds.chunked(6).flatMap { batch ->
+                    coroutineScope {
+                        batch.map { id -> async { readSpotifyQueueMetadata(id, webgate, token)?.let { id to it } } }
+                            .awaitAll().filterNotNull()
+                    }
+                }.toMap()
+            }
         val hydrated =
-            if (incompleteTrackIds.isEmpty()) {
+            if (webgate != null || incompleteTrackIds.isEmpty()) {
                 emptyMap()
             } else {
                 runCatching {
@@ -3591,8 +3610,35 @@ object SpotifyCanvasClient {
         return cachedTracks
             .asSequence()
             .mapNotNull { track ->
-                track.song.mergeWithHydratedSpotifyTrack(hydrated[track.trackId])
+                track.song.mergeWithHydratedSpotifyTrack(internalTracks[track.trackId] ?: hydrated[track.trackId])
             }.toList()
+    }
+
+    private suspend fun readSpotifyQueueMetadata(trackId: String, webgate: String, token: String): SongItem? {
+        spotifyQueueMetadata[trackId]?.let { return it }
+        val gid = spotifyMetadataGid(trackId)
+        if (gid.length != 32) return null
+        return withContext(Dispatchers.IO) {
+            val request = Request.Builder()
+                .url("$webgate/metadata/4/track/$gid")
+                .header("Authorization", "Bearer $token")
+                .header("Accept", "application/x-protobuf")
+                .get()
+                .build()
+            try {
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@withContext null
+                    val song = parseSpotifyQueueMetadata(trackId, response.body.bytes()) ?: return@withContext null
+                    if (spotifyQueueMetadata.size >= 1000) spotifyQueueMetadata.clear()
+                    spotifyQueueMetadata[trackId] = song
+                    song
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                null
+            }
+        }
     }
 
     private fun SongItem?.mergeWithHydratedSpotifyTrack(hydrated: SongItem?): SongItem? {
@@ -10223,7 +10269,7 @@ object SpotifyCanvasClient {
 
     private fun parseProtoMessage(bytes: ByteArray): ProtoMessage = ProtoReader(bytes).readMessage()
 
-    private fun parseProtoMessageOrNull(bytes: ByteArray): ProtoMessage? =
+    internal fun parseProtoMessageOrNull(bytes: ByteArray): ProtoMessage? =
         runCatching { parseProtoMessage(bytes) }
             .getOrNull()
             ?.takeIf { it.fields.isNotEmpty() }
@@ -10248,14 +10294,14 @@ object SpotifyCanvasClient {
         val height: Int,
     )
 
-    private data class ProtoField(
+    internal data class ProtoField(
         val number: Int,
         val wireType: Int,
         val varint: Long? = null,
         val bytes: ByteArray? = null,
     )
 
-    private class ProtoMessage(
+    internal class ProtoMessage(
         val fields: List<ProtoField>,
     ) {
         private val fieldsByNumber = fields.groupBy { it.number }

@@ -1,10 +1,29 @@
 /* Spotify Web Player queue/state and history protocols ported from legacy MetroFuse. */
 import {entityId,track} from './catalog.js';
-import {unbase64} from './encoding.js';
+import {protobuf,text,unbase64} from './encoding.js';
 
 const SDK='harmony:4.72.0',PLATFORM='web_player windows 10;chrome 148.0.0.0;desktop',CLIENT='65b708073fc0480ea92a077233ca87bd';
 const randomId=(length=32)=>Array.from({length},()=>Math.floor(Math.random()*16).toString(16)).join('');
 const SPOTIFY_TRACK_PREFIX='metrofuse:metrofuse.spotify:';
+const SPOTIFY_BASE62='0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+function metadataTrack(bytes, id) {
+  const fields=protobuf(bytes);
+  const firstText=(message,field)=>message?.get(field)?.[0] ? text(message.get(field)[0]) : undefined;
+  const albumBytes=fields.get(3)?.[0];
+  const album=albumBytes&&protobuf(albumBytes);
+  const group=album?.get(17)?.[0];
+  const covers=[...(group ? protobuf(group).get(1)??[] : []),...(album?.get(9)??[])];
+  const images=covers.map(protobuf).flatMap(image=>{
+    const file=image.get(1)?.[0];
+    if(!file?.length)return [];
+    const hex=[...file].map(b=>b.toString(16).padStart(2,'0')).join('');
+    return [{url:'https://i.scdn.co/image/'+hex,width:(image.get(3)?.[0]??0)/2||image.get(2)?.[0]}];
+  });
+  const artists=(fields.get(4)??[]).map(artist=>({name:firstText(protobuf(artist),2)}));
+  return track({id,name:firstText(fields,2),artists,album:{name:firstText(album,2),images},
+    duration_ms:(fields.get(7)?.[0]??0)/2,explicit:fields.get(9)?.[0]===1});
+}
 
 export function isPlaylistContext(uri) {
   return typeof uri==='string'&&/^spotify:(?:(?:user:[^:]+:)?playlist:.+|playlist-format:.+|collection:tracks)$/i.test(uri);
@@ -26,11 +45,11 @@ export function machineTrackId(value) {
 export function machineTrack(value) {
   const id=machineTrackId(value);if(!id)return null;const meta=value.metadata??value;
   const artists=Array.isArray(meta.artists)?meta.artists:Array.isArray(value.artists)?value.artists:[{name:meta.artist_name??meta.artist??meta.artistName}].filter(x=>x.name);
-  const album={name:meta.group_name??meta.album_name??meta.albumName??meta.album??value.album?.name??'',uri:meta.group_uri??meta.album_uri??value.album?.uri,
+  const album={name:meta.group_name??meta.album_name??meta.album_title??meta.albumName??meta.album??value.album?.name??'',uri:meta.group_uri??meta.album_uri??value.album?.uri,
     coverArt:value.album?.coverArt,
-    images:[...(Array.isArray(value.album?.images)?value.album.images:[]),{url:meta.image_url??meta.imageUrl??meta.image??meta.cover_url}]};
+    images:[...(Array.isArray(value.album?.images)?value.album.images:[]),{url:meta.image_large_url??meta.image_url??meta.imageUrl??meta.image??meta.cover_url}]};
   const duration=Number(meta.duration??meta.duration_ms??value.duration_ms??0);
-  return track({uri:'spotify:track:'+id,name:meta.name??meta.title??value.name??value.title,artists,album,duration_ms:duration,explicit:meta.is_explicit===true||meta.explicit===true||meta.explicit==='true'});
+  return track({uri:'spotify:track:'+id,name:meta.name??meta.title??value.name??value.title,artists,album,duration_ms:duration,explicit:meta.is_explicit===true||meta.is_explicit==='true'||meta.explicit===true||meta.explicit==='true'});
 }
 function queueTrackEntry(value) {
   const full=machineTrack(value);if(full)return full;
@@ -94,7 +113,7 @@ export function historyEvents(session,kind,position=0,nextPlaybackId='',endPosit
   return [{type:'jssdk_playback_stats',message:stats},{type:'track_stream_verification',message:{...common,ms_played:position,ms_nominal_played:position,sequence_id:1,next_playback_id:nextPlaybackId,playback_service:'web_player'}}];
 }
 export class SpotifyWebPlayer {
-  constructor(session,catalog) {this.auth=session;this.catalog=catalog;this.host=session.host;this.device=null;this.current=null;this.queueCache=null;this.openPromise=null;this.commands=[];this.blockedUntil=0;this.tail=Promise.resolve();this.stopped=false;this.lastSessionTime=0;this.resolvedCache=new Map();this.pendingObservation=null;this.protectedOccurrence=null;}
+  constructor(session,catalog) {this.auth=session;this.catalog=catalog;this.host=session.host;this.device=null;this.current=null;this.queueCache=null;this.queueMetadata=new Map();this.connectWebgate=null;this.openPromise=null;this.commands=[];this.blockedUntil=0;this.tail=Promise.resolve();this.stopped=false;this.lastSessionTime=0;this.resolvedCache=new Map();this.pendingObservation=null;this.protectedOccurrence=null;}
   check(snapshot) {this.auth.check(snapshot);if(this.stopped)throw Error('PLUGIN_STOPPED');}
   enqueue(fn) {const result=this.tail.then(fn);this.tail=result.catch(error=>{if(error.message!=='ACCOUNT_CHANGED'&&error.message!=='PLUGIN_STOPPED'){const code=/^SPOTIFY_[A-Z_0-9]+$/.test(error.message)?error.message:'UNKNOWN_ERROR';this.host.log('Spotify Web Player operation failed ('+code+')');}});return result;}
   async post(path,body,snapshot,method='POST') {
@@ -147,7 +166,7 @@ export class SpotifyWebPlayer {
     }
     this.check(snapshot);
     if(message.connectionId)device.connectionId=message.connectionId;
-    if(message.cluster){const queue=clusterQueue(message.cluster,{allowSparse:true});if(queue)this.cacheQueue(queue,snapshot,{preview:true});}
+    if(message.cluster){const queue=clusterQueue(message.cluster,{allowSparse:true});if(queue)this.cacheQueue({...queue,webgate:device.webgate},snapshot,{preview:true});}
     if(message.command){this.commands.push(message.command);while(this.commands.length>16)this.commands.shift();}
     return true;
   }
@@ -158,13 +177,8 @@ export class SpotifyWebPlayer {
   }
   async requestState(item,snapshot,contextUri) {
     const device=await this.open(snapshot),id=playbackTrackId(item);if(!id)throw Error('SPOTIFY_TRACK_REQUIRED');
-    const active=await this.auth.rest('/me/player',{},snapshot).catch(()=>{this.check(snapshot);return null;});
-    if(active==null){
-      const root=await this.auth.json(device.webgate+'/connect-state/v1/cluster',{},snapshot).catch(()=>{this.check(snapshot);return null;});
-      const cluster=root?.cluster??root;
-      if(cluster?.active_device_id!==device.deviceId&&isPlaylistContext(cluster?.player_state?.context_uri??cluster?.player_state?.context?.uri))
-        throw Error('SPOTIFY_PLAYLIST_ACTIVE');
-    }else if(active.device?.id!==device.deviceId&&(active.context?.type==='playlist'||isPlaylistContext(active.context?.uri))){
+    const cluster=await this.readConnectCluster(snapshot);
+    if(cluster.active_device_id!==device.deviceId&&isPlaylistContext(cluster.player_state?.context_uri??cluster.player_state?.context?.uri)){
       throw Error('SPOTIFY_PLAYLIST_ACTIVE');
     }
     const uri='spotify:track:'+id;
@@ -184,6 +198,17 @@ export class SpotifyWebPlayer {
   }
   async hydrateQueue(queueObj,snapshot) {
     if(!queueObj)return null;
+    if(queueObj.webgate){
+      const ids=[...new Set(queueObj.tracks.filter(item=>item._sparse||!item.artist).map(item=>entityId(item.id)))];
+      const byId=new Map();
+      for(let offset=0;offset<ids.length;offset+=6){
+        const batch=ids.slice(offset,offset+6);
+        const results=await Promise.all(batch.map(id=>this.readQueueMetadata(id,queueObj.webgate,snapshot)));
+        results.forEach((item,i)=>{if(item)byId.set(batch[i],item);});
+      }
+      const tracks=queueObj.tracks.map(item=>byId.get(entityId(item.id))??item);
+      return tracks.some(item=>item._sparse)?null:{...queueObj,tracks};
+    }
     if(!queueObj.tracks.some(item=>item._sparse||!item.artist))return queueObj;
     if(!this.catalog?.hydrate)return queueObj.tracks.every(item=>!item._sparse)?queueObj:null;
     const hydrated=await this.catalog.hydrate(queueObj.tracks,snapshot);this.check(snapshot);
@@ -196,6 +221,38 @@ export class SpotifyWebPlayer {
     if(resolved.some(item=>!item))return null;
     return {...queueObj,tracks:resolved};
   }
+  async readQueueMetadata(id,webgate,snapshot) {
+    if(!id)return null;
+    if(this.queueMetadata.has(id))return this.queueMetadata.get(id);
+    const gid=[...id].reduce((value,char)=>value*62n+BigInt(SPOTIFY_BASE62.indexOf(char)),0n).toString(16).padStart(32,'0');
+    if(gid.length!==32)return null;
+    try{
+      const token=await this.auth.token(snapshot);
+      const response=await this.auth.request({url:webgate+'/metadata/4/track/'+gid,responseType:'base64',
+        headers:{Accept:'application/x-protobuf',Authorization:'Bearer '+token},maxBytes:524288});
+      this.check(snapshot);
+      const item=response.status===200&&response.bodyEncoding==='base64'?metadataTrack(unbase64(response.body),id):null;
+      if(item){
+        this.queueMetadata.set(id,item);
+        if(this.queueMetadata.size>1000)this.queueMetadata.delete(this.queueMetadata.keys().next().value);
+      }
+      return item;
+    }catch(error){this.check(snapshot);return null;}
+  }
+  async connectEndpoint(snapshot) {
+    if(this.device?.webgate)return this.device.webgate;
+    if(this.connectWebgate)return this.connectWebgate;
+    const endpoints=await this.auth.publicJson('https://apresolve.spotify.com/?type=spclient');
+    this.check(snapshot);
+    const host=endpoints.spclient?.[0];
+    if(typeof host!=='string'||!/^[-a-z0-9.]+\.spotify\.com(?::443)?$/i.test(host))throw Error('INVALID_SPOTIFY_ENDPOINT');
+    return this.connectWebgate='https://'+host;
+  }
+  async readConnectCluster(snapshot) {
+    const webgate=await this.connectEndpoint(snapshot);
+    const root=await this.auth.json(webgate+'/connect-state/v1/cluster',{},snapshot);
+    return root.cluster??root;
+  }
   cacheQueue(queue,snapshot,{preview=false}={}) {
     const cached=this.queueCache;
     if(preview&&queue.tracks.length>1&&cached?.revision===snapshot.revision&&Date.now()-cached.at<60000&&
@@ -203,6 +260,14 @@ export class SpotifyWebPlayer {
     return this.queueCache={...queue,revision:snapshot.revision,at:Date.now()};
   }
   async fetchQueue(snapshot,expectedId) {
+    const cluster=await this.readConnectCluster(snapshot).catch(()=>{this.check(snapshot);return null;});
+    const remoteTrackId=machineTrackId(cluster?.player_state?.track);
+    if(expectedId&&remoteTrackId&&remoteTrackId!==expectedId){this.queueCache=null;return null;}
+    const queue=clusterQueue(cluster,{allowSparse:true});
+    if(queue){
+      const webgate=await this.connectEndpoint(snapshot);
+      return this.cacheQueue({...queue,webgate},snapshot,{preview:true});
+    }
     const response=await this.auth.rest('/me/player/queue',{},snapshot).catch(()=>{this.check(snapshot);return null;});
     if(response?.currently_playing===null){
       this.queueCache=null;
@@ -214,12 +279,7 @@ export class SpotifyWebPlayer {
       return null;
     }
     const full=webApiQueue(response);
-    if(full)return this.cacheQueue(full,snapshot);
-    await this.open(snapshot);
-    const root=await this.auth.json(this.device.webgate+'/connect-state/v1/cluster',{},snapshot);
-    const queue=clusterQueue(root,{allowSparse:true});
-    if(queue&&(!expectedId||playbackTrackId(queue.tracks[0])===expectedId))return this.cacheQueue(queue,snapshot,{preview:true});
-    return null;
+    return full?this.cacheQueue(full,snapshot):null;
   }
   async resolveTrack(item,identity) {
     if(playbackTrackId(item))return item;
@@ -331,6 +391,6 @@ export class SpotifyWebPlayer {
     const device=this.device;this.device=null;this.commands=[];
     if(device){device.unsubscribe?.();try{await this.host.socket.close(device.id);}catch{}}
   }
-  async reset() {this.current=null;this.queueCache=null;this.blockedUntil=0;this.pendingObservation=null;this.protectedOccurrence=null;this.resolvedCache.clear();await this.closeDevice();}
-  async stop() {this.stopped=true;this.current=null;this.queueCache=null;this.pendingObservation=null;this.resolvedCache.clear();await this.closeDevice();}
+  async reset() {this.current=null;this.queueCache=null;this.queueMetadata.clear();this.connectWebgate=null;this.blockedUntil=0;this.pendingObservation=null;this.protectedOccurrence=null;this.resolvedCache.clear();await this.closeDevice();}
+  async stop() {this.stopped=true;await this.reset();}
 }
