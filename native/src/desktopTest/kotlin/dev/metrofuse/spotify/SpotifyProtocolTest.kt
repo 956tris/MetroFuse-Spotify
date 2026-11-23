@@ -1,7 +1,11 @@
 package dev.metrofuse.spotify
 
 import dev.metrofuse.api.PlaybackState
+import dev.metrofuse.api.LyricsRequest
+import dev.metrofuse.api.PluginContext
+import dev.metrofuse.api.PluginSettings
 import dev.metrofuse.api.Track
+import dev.metrofuse.api.TrackIdentity
 import dev.metrofuse.api.WebLoginRequest
 import dev.metrofuse.sdk.acceptsBrowserNavigation
 import dev.metrofuse.sdk.captureBrowserCookies
@@ -10,11 +14,29 @@ import dev.metrofuse.spotify.legacy.MediaMetadata
 import dev.metrofuse.spotify.legacy.SongItem
 import dev.metrofuse.spotify.legacy.SpotifyCanvasClient
 import dev.metrofuse.spotify.legacy.normalizeSpotifyCookieInput
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
+import java.lang.reflect.Proxy
 import kotlin.test.*
 
 class SpotifyProtocolTest {
+    @Test fun lyricsProviderSkipsLookupWhileSignedOut() = runBlocking {
+        val settings = object : PluginSettings {
+            override val values = MutableStateFlow<Map<String, JsonElement>>(emptyMap())
+            override suspend fun set(key: String, value: JsonElement) = error("Unexpected settings write")
+        }
+        val contextType = PluginContext::class.java
+        val context = contextType.cast(
+            Proxy.newProxyInstance(contextType.classLoader, arrayOf(contextType)) { _, method, _ ->
+                check(method.name == "getSettings") { "Unexpected host call: ${method.name}" }
+                settings
+            },
+        )
+        val catalog = SpotifyCatalog(SpotifyPlugin(), context)
+        assertNull(catalog.lyrics(LyricsRequest(TrackIdentity("fixture"), "Track", "Artist", 180_000)))
+    }
+
     @Test fun optionalMetadataAccountSkipsLookupWhileSignedOut() = runBlocking {
         val plugin = SpotifyPlugin()
         assertNull(plugin.accountIfSignedIn { fail("Signed-out metadata lookup must skip the provider") })
@@ -195,6 +217,7 @@ class SpotifyProtocolTest {
                     override fun start(
                         track: MediaMetadata,
                         context: String?,
+                        initialPositionMs: Long,
                     ) {
                         events += "start:${track.id}"
                     }

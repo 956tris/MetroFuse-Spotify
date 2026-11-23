@@ -29,6 +29,7 @@ class SpotifyListeningHistoryManager(
     var reportDelaySeconds: Int = 50,
 ) {
     private val resolveMutex = Mutex()
+    private val historyIoMutex = Mutex()
     private var reportJob: Job? = null
     private var startJob: Job? = null
     private var reportRemainingMillis: Long = 0L
@@ -127,6 +128,7 @@ class SpotifyListeningHistoryManager(
         duration: Long? = null,
         playbackContextUri: String? = null,
         newOccurrence: Boolean = false,
+        initialPositionMs: Long = 0L,
     ) {
         if (metadata == null) return
         if (metadata.isEpisode || metadata.isVideoSong) {
@@ -147,7 +149,7 @@ class SpotifyListeningHistoryManager(
                 .takeIf { it > 0 }
                 ?.let { activeDurationMs = it * 1000L }
             if (!activeSpotifySessionStarted && resolvingMediaId != mediaId) {
-                startSpotifyPlaybackSession(metadata, duration)
+                startSpotifyPlaybackSession(metadata, duration, initialPositionMs)
             }
             return
         }
@@ -170,12 +172,12 @@ class SpotifyListeningHistoryManager(
         failedResolutionMediaId = null
         activeMetadata = metadata
         activeDurationMs = durationSeconds(metadata, duration) * 1000L
-        activePlaybackPositionMs = 0L
+        activePlaybackPositionMs = initialPositionMs.coerceAtLeast(0L)
         activePlaybackPositionStartedAtMs = songStartedAtMs
         lastPlaybackControlPaused = false
         currentTrackStateId = SpotifyCanvasClient.newListeningHistoryStateId()
         startReportTimer(metadata, duration)
-        startSpotifyPlaybackSession(metadata, duration)
+        startSpotifyPlaybackSession(metadata, duration, activePlaybackPositionMs)
     }
 
     fun onSongStop() {
@@ -329,6 +331,7 @@ class SpotifyListeningHistoryManager(
     private fun startSpotifyPlaybackSession(
         metadata: MediaMetadata,
         duration: Long? = null,
+        initialPositionMs: Long = 0L,
     ) {
         if (SpotifyCanvasClient.isListeningHistoryBackedOff()) return
         val mediaId = metadata.id
@@ -345,49 +348,52 @@ class SpotifyListeningHistoryManager(
         resolvingMediaId = mediaId
         startJob =
             scope.launch(Dispatchers.IO) {
-                try {
-                    val cookie = cookieProvider()?.takeIf { it.isNotBlank() } ?: return@launch
-                    val spotifyUri =
-                        resolveSpotifyUriForActive(metadata, cookie, mediaId)
-                    if (spotifyUri == null) {
-                        failedResolutionMediaId = mediaId
-                        finalizePendingSpotifyPlaybackSession(nextPlaybackId = null)
-                        return@launch
-                    }
-                    if (failedResolutionMediaId == mediaId) {
-                        failedResolutionMediaId = null
-                    }
-                    if (!songStarted || songStartedAtMs != startedAtMs || activeMediaId != mediaId) return@launch
+                historyIoMutex.withLock {
+                    try {
+                        val cookie = cookieProvider()?.takeIf { it.isNotBlank() } ?: return@withLock
+                        val spotifyUri =
+                            resolveSpotifyUriForActive(metadata, cookie, mediaId)
+                        if (spotifyUri == null) {
+                            failedResolutionMediaId = mediaId
+                            finalizePendingSpotifyPlaybackSession(nextPlaybackId = null)
+                            return@withLock
+                        }
+                        if (failedResolutionMediaId == mediaId) {
+                            failedResolutionMediaId = null
+                        }
+                        if (!songStarted || songStartedAtMs != startedAtMs || activeMediaId != mediaId) return@withLock
 
-                    setSpotifyPresenceActive(true)
-                    val started =
-                        SpotifyCanvasClient.reportListeningHistoryStartBestEffort(
-                            trackUri = spotifyUri,
-                            cookie = cookie,
-                            startedAtMs = startedAtMs,
-                            durationMs = durationMs,
-                            stateMachineId = currentStateMachineId,
-                            stateId = currentTrackStateId,
-                            playbackContextUri = playbackContextUri,
-                            deviceName = deviceNameProvider(),
-                        )
-                    if (!started && activeMediaId == mediaId) {
-                        activeSpotifySessionStarted = false
-                        setSpotifyPresenceActive(false)
-                        finalizePendingSpotifyPlaybackSession(nextPlaybackId = null)
-                    } else if (started && activeMediaId == mediaId) {
-                        activeSpotifySessionStarted = true
-                        val nextPlaybackId =
-                            SpotifyCanvasClient.listeningHistoryPlaybackId(
+                        setSpotifyPresenceActive(true)
+                        val started =
+                            SpotifyCanvasClient.reportListeningHistoryStartBestEffort(
                                 trackUri = spotifyUri,
+                                cookie = cookie,
                                 startedAtMs = startedAtMs,
+                                durationMs = durationMs,
+                                initialPositionMs = initialPositionMs,
+                                stateMachineId = currentStateMachineId,
+                                stateId = currentTrackStateId,
+                                playbackContextUri = playbackContextUri,
+                                deviceName = deviceNameProvider(),
                             )
-                        finalizePendingSpotifyPlaybackSession(nextPlaybackId = nextPlaybackId)
-                        onSpotifyAutoplayQueueReady(metadata)
-                    }
-                } finally {
-                    if (resolvingMediaId == mediaId) {
-                        resolvingMediaId = null
+                        if (!started && activeMediaId == mediaId) {
+                            activeSpotifySessionStarted = false
+                            setSpotifyPresenceActive(false)
+                            finalizePendingSpotifyPlaybackSession(nextPlaybackId = null)
+                        } else if (started && activeMediaId == mediaId) {
+                            activeSpotifySessionStarted = true
+                            val nextPlaybackId =
+                                SpotifyCanvasClient.listeningHistoryPlaybackId(
+                                    trackUri = spotifyUri,
+                                    startedAtMs = startedAtMs,
+                                )
+                            finalizePendingSpotifyPlaybackSession(nextPlaybackId = nextPlaybackId)
+                            onSpotifyAutoplayQueueReady(metadata)
+                        }
+                    } finally {
+                        if (resolvingMediaId == mediaId) {
+                            resolvingMediaId = null
+                        }
                     }
                 }
             }
@@ -406,11 +412,12 @@ class SpotifyListeningHistoryManager(
     private fun resumeReportTimer(metadata: MediaMetadata) {
         if (reportRemainingMillis <= 0L) return
         reportJob?.cancel()
+        val durationMs = activeDurationMs.takeIf { it > 0L } ?: metadata.duration * 1000L
         reportTimerStartedAt = System.currentTimeMillis()
         reportJob =
             scope.launch {
                 delay(reportRemainingMillis)
-                reportSong(metadata, metadata.duration * 1000L)
+                reportSong(metadata, durationMs)
                 reportJob = null
             }
     }
@@ -484,18 +491,20 @@ class SpotifyListeningHistoryManager(
         nextPlaybackId: String?,
     ) {
         scope.launch(Dispatchers.IO) {
-            val cookie = cookieProvider()?.takeIf { it.isNotBlank() } ?: return@launch
-            SpotifyCanvasClient.reportListeningHistoryFinalizedBestEffort(
-                trackUri = trackUri,
-                cookie = cookie,
-                startedAtMs = startedAtMs,
-                durationMs = durationMs,
-                positionMs = positionMs,
-                stateMachineId = stateMachineId,
-                stateId = stateId,
-                updateDeviceState = updateDeviceState,
-                nextPlaybackId = nextPlaybackId,
-            )
+            historyIoMutex.withLock {
+                val cookie = cookieProvider()?.takeIf { it.isNotBlank() } ?: return@withLock
+                SpotifyCanvasClient.reportListeningHistoryFinalizedBestEffort(
+                    trackUri = trackUri,
+                    cookie = cookie,
+                    startedAtMs = startedAtMs,
+                    durationMs = durationMs,
+                    positionMs = positionMs,
+                    stateMachineId = stateMachineId,
+                    stateId = stateId,
+                    updateDeviceState = updateDeviceState,
+                    nextPlaybackId = nextPlaybackId,
+                )
+            }
         }
     }
 
@@ -510,18 +519,20 @@ class SpotifyListeningHistoryManager(
         lastPlaybackControlPaused = paused
 
         scope.launch(Dispatchers.IO) {
-            val cookie = cookieProvider()?.takeIf { it.isNotBlank() } ?: return@launch
-            SpotifyCanvasClient.reportListeningHistoryPlaybackControlBestEffort(
-                trackUri = spotifyUri,
-                cookie = cookie,
-                startedAtMs = startedAtMs,
-                durationMs = durationMs,
-                positionMs = positionMs,
-                paused = paused,
-                stateMachineId = currentStateMachineId,
-                stateId = currentTrackStateId,
-                deviceName = deviceNameProvider(),
-            )
+            historyIoMutex.withLock {
+                val cookie = cookieProvider()?.takeIf { it.isNotBlank() } ?: return@withLock
+                SpotifyCanvasClient.reportListeningHistoryPlaybackControlBestEffort(
+                    trackUri = spotifyUri,
+                    cookie = cookie,
+                    startedAtMs = startedAtMs,
+                    durationMs = durationMs,
+                    positionMs = positionMs,
+                    paused = paused,
+                    stateMachineId = currentStateMachineId,
+                    stateId = currentTrackStateId,
+                    deviceName = deviceNameProvider(),
+                )
+            }
         }
     }
 
@@ -538,19 +549,21 @@ class SpotifyListeningHistoryManager(
         if (startedAtMs <= 0L || durationMs <= minSongDuration * 1000L) return
 
         scope.launch(Dispatchers.IO) {
-            val cookie = cookieProvider()?.takeIf { it.isNotBlank() } ?: return@launch
-            SpotifyCanvasClient.reportListeningHistorySeekBestEffort(
-                trackUri = spotifyUri,
-                cookie = cookie,
-                startedAtMs = startedAtMs,
-                durationMs = durationMs,
-                positionMs = positionMs,
-                previousPositionMs = previousPositionMs,
-                paused = paused,
-                stateMachineId = currentStateMachineId,
-                stateId = currentTrackStateId,
-                deviceName = deviceNameProvider(),
-            )
+            historyIoMutex.withLock {
+                val cookie = cookieProvider()?.takeIf { it.isNotBlank() } ?: return@withLock
+                SpotifyCanvasClient.reportListeningHistorySeekBestEffort(
+                    trackUri = spotifyUri,
+                    cookie = cookie,
+                    startedAtMs = startedAtMs,
+                    durationMs = durationMs,
+                    positionMs = positionMs,
+                    previousPositionMs = previousPositionMs,
+                    paused = paused,
+                    stateMachineId = currentStateMachineId,
+                    stateId = currentTrackStateId,
+                    deviceName = deviceNameProvider(),
+                )
+            }
         }
     }
 
@@ -596,53 +609,55 @@ class SpotifyListeningHistoryManager(
         durationMs: Long,
     ) {
         scope.launch(Dispatchers.IO) {
-            if (SpotifyCanvasClient.isListeningHistoryBackedOff()) return@launch
-            val cookie = cookieProvider()?.takeIf { it.isNotBlank() } ?: return@launch
-            val startedAtMs = songStartedAtMs
-            val mediaId = metadata.id
-            if (activeMediaId != mediaId) return@launch
-            val spotifyUri =
-                activeSpotifyUri
-                    ?: resolveSpotifyUriForActive(metadata, cookie, mediaId)
-                    ?: return@launch
-            if (!songStarted || songStartedAtMs != startedAtMs || activeMediaId != mediaId) return@launch
+            historyIoMutex.withLock {
+                if (SpotifyCanvasClient.isListeningHistoryBackedOff()) return@withLock
+                val cookie = cookieProvider()?.takeIf { it.isNotBlank() } ?: return@withLock
+                val startedAtMs = songStartedAtMs
+                val mediaId = metadata.id
+                if (activeMediaId != mediaId) return@withLock
+                val spotifyUri =
+                    activeSpotifyUri
+                        ?: resolveSpotifyUriForActive(metadata, cookie, mediaId)
+                        ?: return@withLock
+                if (!songStarted || songStartedAtMs != startedAtMs || activeMediaId != mediaId) return@withLock
 
-            val reportKey = SpotifyCanvasClient.listeningHistorySessionKey(spotifyUri, startedAtMs)
-            synchronized(reportedKeys) {
-                if (!reportedKeys.add(reportKey)) return@launch
-                while (reportedKeys.size > 64) {
-                    reportedKeys.remove(reportedKeys.first())
+                val reportKey = SpotifyCanvasClient.listeningHistorySessionKey(spotifyUri, startedAtMs)
+                synchronized(reportedKeys) {
+                    if (!reportedKeys.add(reportKey)) return@withLock
+                    while (reportedKeys.size > 64) {
+                        reportedKeys.remove(reportedKeys.first())
+                    }
                 }
-            }
 
-            val wasSpotifyPresenceActive = spotifyPresenceActive
-            setSpotifyPresenceActive(true)
-            val reported =
-                SpotifyCanvasClient.reportListeningHistoryBestEffort(
-                    trackUri = spotifyUri,
-                    cookie = cookie,
-                    startedAtMs = startedAtMs,
-                    durationMs = durationMs,
-                    positionMs = currentPlaybackPositionMs(durationMs),
-                    stateMachineId = currentStateMachineId,
-                    stateId = currentTrackStateId,
-                    playbackContextUri = activePlaybackContextUri,
-                    deviceName = deviceNameProvider(),
-                )
-            if (!reported) {
-                synchronized(reportedKeys) { reportedKeys.remove(reportKey) }
-                Timber.i("Spotify listening history write unavailable for matched track %s", spotifyUri)
-                if (!wasSpotifyPresenceActive && activeMediaId == mediaId) {
-                    setSpotifyPresenceActive(false)
-                }
-            } else if (activeMediaId == mediaId) {
-                activeSpotifySessionStarted = true
-                val nextPlaybackId =
-                    SpotifyCanvasClient.listeningHistoryPlaybackId(
+                val wasSpotifyPresenceActive = spotifyPresenceActive
+                setSpotifyPresenceActive(true)
+                val reported =
+                    SpotifyCanvasClient.reportListeningHistoryBestEffort(
                         trackUri = spotifyUri,
+                        cookie = cookie,
                         startedAtMs = startedAtMs,
+                        durationMs = durationMs,
+                        positionMs = currentPlaybackPositionMs(durationMs),
+                        stateMachineId = currentStateMachineId,
+                        stateId = currentTrackStateId,
+                        playbackContextUri = activePlaybackContextUri,
+                        deviceName = deviceNameProvider(),
                     )
-                finalizePendingSpotifyPlaybackSession(nextPlaybackId = nextPlaybackId)
+                if (!reported) {
+                    synchronized(reportedKeys) { reportedKeys.remove(reportKey) }
+                    Timber.i("Spotify listening history write unavailable for matched track %s", spotifyUri)
+                    if (!wasSpotifyPresenceActive && activeMediaId == mediaId) {
+                        setSpotifyPresenceActive(false)
+                    }
+                } else if (activeMediaId == mediaId) {
+                    activeSpotifySessionStarted = true
+                    val nextPlaybackId =
+                        SpotifyCanvasClient.listeningHistoryPlaybackId(
+                            trackUri = spotifyUri,
+                            startedAtMs = startedAtMs,
+                        )
+                    finalizePendingSpotifyPlaybackSession(nextPlaybackId = nextPlaybackId)
+                }
             }
         }
     }

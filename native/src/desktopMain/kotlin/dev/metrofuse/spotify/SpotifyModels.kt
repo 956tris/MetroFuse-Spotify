@@ -58,9 +58,11 @@ internal fun Track.legacy() =
         ),
         (duration / 1000).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
         artwork.takeIf(String::isNotBlank),
-        extras["albumId"]?.let {
+        if (album.isNotBlank() || !extras["albumId"].isNullOrBlank()) {
             dev.metrofuse.spotify.legacy
-                .Album(album, it)
+                .Album(album, extras["albumId"].orEmpty())
+        } else {
+            null
         },
         extras["explicit"] == "true",
     )

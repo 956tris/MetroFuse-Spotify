@@ -9,6 +9,12 @@ async function artistMetadata(request) {
   return {...value,...value.metadata,popularReleases:value.metadata?.popularReleases??value.albums,
     relatedArtists:value.metadata?.relatedArtists??[],playlists:[...(value.metadata?.artistPlaylists??[]),...(value.metadata?.featuringPlaylists??[])],concerts:value.metadata?.concerts??[],merch:value.metadata?.merch??[]};
 }
+function ownTrack(track) {
+  const rawId=entityId(track?.id)??entityId(track?.extras?.['spotify.uri']);
+  if(!rawId)return track;
+  const fullId='metrofuse:metrofuse.spotify:spotify:track:'+rawId;
+  return {...track,id:fullId,extras:{...track.extras,pluginOwner:'metrofuse.spotify',providerTrackId:'spotify:track:'+rawId}};
+}
 async function playbackChanged(playback,revision) {
   if(!session.cookie||revision!==session.revision)return;
   await webplayer.observe(playback);
@@ -19,8 +25,12 @@ async function playbackChanged(playback,revision) {
   const snapshot=session.snapshot();
   const refresh=occurrence!==lastQueueOccurrence||Date.now()-lastQueueRefresh>=15000;
   const result=await webplayer.queue({track:playback.track,refresh});session.check(snapshot);if(refresh)lastQueueRefresh=Date.now();
-  const key=JSON.stringify([occurrence,result.current?.id,result.contextUri,result.tracks]);
-  if(result.complete&&result.current&&key!==lastQueueKey){await host.replaceUpcomingQueue(result.tracks);lastQueueOccurrence=occurrence;lastQueueKey=key;}
+  const ownedUpcoming=(result.tracks||[]).map(ownTrack);
+  const currentHostQueueIds=Array.isArray(playback.queue)&&Number.isInteger(playback.currentIndex)?playback.queue.slice(playback.currentIndex+1).map(t=>t.id):null;
+  const upcomingIds=ownedUpcoming.map(t=>t.id);
+  const hostMatches=currentHostQueueIds==null||(currentHostQueueIds.length===upcomingIds.length&&currentHostQueueIds.every((id,i)=>id===upcomingIds[i]));
+  const key=JSON.stringify([occurrence,result.current?.id,result.contextUri,upcomingIds]);
+  if(result.complete&&result.current&&(key!==lastQueueKey||!hostMatches)){await host.replaceUpcomingQueue(ownedUpcoming);lastQueueOccurrence=occurrence;lastQueueKey=key;}
 }
 
 globalThis.plugin={
@@ -42,7 +52,7 @@ globalThis.plugin={
       return {identity:{...request.identity,identifiers:{...request.identity?.identifiers,spotify:entityId(value.id)},isrc:value.extras?.isrc??request.identity?.isrc},
         fields:{title:value.title,artist:value.artist,album:value.album,duration:value.duration,artwork:value.artwork,...value.extras,...Object.fromEntries(Object.entries(mix).filter(([,v])=>v!==undefined)),...(canvas.url?{'spotify.canvas':canvas.url}:{})},confidence:1};
     });
-    host.lyrics('spotify.lyrics',request=>catalog.lyrics(request));
+    host.lyrics('spotify.lyrics',async request=>session.cookie?catalog.lyrics(request):null);
     for(const name of ['spotify.canvas/v1','artwork.canvas/v1'])host.service(name,request=>catalog.canvas(request));
     for(const name of ['spotify.artist/v1','catalog.artist-metadata/v1'])host.service(name,artistMetadata);
     host.service('spotify.history/v1',request=>catalog.recent(request.limit));

@@ -24,6 +24,7 @@ internal interface HistoryActions {
     fun start(
         track: MediaMetadata,
         context: String?,
+        initialPositionMs: Long = 0L,
     )
 
     fun state(
@@ -88,8 +89,7 @@ internal class PlaybackHistoryObserver(
             activeTrackId = value.track.id
             activeQueueIndex = value.currentIndex
             activeOccurrence = occurrence
-            actions.start(track, context)
-            if (value.position > 1000) actions.seek(value.position, true, track, context)
+            actions.start(track, context, value.position.coerceAtLeast(0L))
             return
         }
         if (occurrence != null) activeOccurrence = occurrence
@@ -97,7 +97,10 @@ internal class PlaybackHistoryObserver(
         if (last != null && last.track.id == value.track.id) {
             if (last.playing != value.playing) actions.state(value.playing, track, context)
             val expected = last.position + if (last.playing) elapsed else 0
-            if (abs(value.position - expected) >= 2000) actions.seek(value.position, value.playing, track, context)
+            val stalledAtZero = last.position == 0L && value.position == 0L
+            if (!stalledAtZero && abs(value.position - expected) >= 2000) {
+                actions.seek(value.position, value.playing, track, context)
+            }
         }
     }
 
@@ -120,13 +123,21 @@ internal class SpotifyPlaybackHistory(
     private var observer: PlaybackHistoryObserver? = null
 
     init {
+        SpotifyCanvasClient.setClusterUpdateListener {
+            accountScope.launch {
+                val snapshot = context.player.state.value
+                if (queueSyncEnabled() && snapshot.track.id.isNotBlank()) {
+                    synchronizeQueue(snapshot, refresh = false)
+                }
+            }
+        }
         accountScope.launch {
             combine(context.player.state, context.settings.values) { playback, settings ->
                 Triple(playback.track.id, playback.playbackInstanceId, settings["queueSyncEnabled"]?.jsonPrimitive?.booleanOrNull == true)
             }.distinctUntilChanged().collectLatest { (_, _, enabled) ->
                 if (enabled) {
                     while (currentCookie() === cookie) {
-                        synchronizeQueue(context.player.state.value)
+                        synchronizeQueue(context.player.state.value, refresh = true)
                         delay(20_000)
                     }
                 }
@@ -180,7 +191,8 @@ internal class SpotifyPlaybackHistory(
                     override fun start(
                         track: MediaMetadata,
                         context: String?,
-                    ) = history.onSongStart(track, playbackContextUri = context, newOccurrence = true)
+                        initialPositionMs: Long,
+                    ) = history.onSongStart(track, playbackContextUri = context, newOccurrence = true, initialPositionMs = initialPositionMs)
 
                     override fun state(
                         playing: Boolean,
@@ -200,12 +212,15 @@ internal class SpotifyPlaybackHistory(
             )
     }
 
-    private suspend fun synchronizeQueue(snapshot: PlaybackState) {
+    private suspend fun synchronizeQueue(
+        snapshot: PlaybackState,
+        refresh: Boolean = true,
+    ) {
         val player = context.player as? UpcomingQueuePlayer ?: return
         if ("replaceUpcomingQueue" !in player.capabilities || !queueSyncEnabled() || snapshot.track.id.isBlank()) return
         val tracks =
             try {
-                SpotifyCanvasClient.resolveWebPlayerQueue(snapshot.track.legacy(), cookie, refresh = true)
+                SpotifyCanvasClient.resolveWebPlayerQueue(snapshot.track.legacy(), cookie, refresh = refresh)
             } catch (error: kotlinx.coroutines.CancellationException) {
                 throw error
             } catch (error: Exception) {

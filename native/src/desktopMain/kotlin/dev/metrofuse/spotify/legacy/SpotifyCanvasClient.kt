@@ -266,6 +266,7 @@ object SpotifyCanvasClient {
     private const val DEVICE_TOKEN_URL = "https://accounts.spotify.com/api/token"
     private const val DEVICE_RESOLVE_URL = "https://accounts.spotify.com/pair/api/resolve"
     private const val DEVICE_CLIENT_ID = "65b708073fc0480ea92a077233ca87bd"
+    private const val WEB_PLAYER_CLIENT_ID = "d8a5ed958d274c2e8ee717e6a4b0971d"
     private const val DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
     private const val DEVICE_SCOPE =
         "app-remote-control,playlist-modify,playlist-modify-private,playlist-modify-public," +
@@ -279,7 +280,10 @@ object SpotifyCanvasClient {
 
     private const val SERVER_TIME_URL = "https://open.spotify.com/api/server-time"
     private const val WEB_TOKEN_URL = "https://open.spotify.com/api/token"
+    private const val CLIENT_TOKEN_URL = "https://clienttoken.spotify.com/v1/clienttoken"
+    private const val CLIENT_TOKEN_APP_VERSION = "1.2.66.447.g86d422d1"
     private const val NUANCE_GIST_URL = "https://api.github.com/gists/22ed9c6ba463899e933427f7de1f0eef"
+    private const val NUANCE_CACHE_TTL_MS = 60 * 60 * 1000L
     private const val WEB_REFERER = "https://open.spotify.com/"
     private const val WEB_ORIGIN = "https://open.spotify.com"
     private const val SPOTIFY_WEBGATE_URL = "https://spclient.wg.spotify.com/"
@@ -404,6 +408,16 @@ object SpotifyCanvasClient {
     private var webToken: String? = null
     private var webTokenExpiryMs = 0L
     private var activeWebCookie: String? = null
+    private val clientTokenMutex = Mutex()
+    private var clientToken: String? = null
+    private var clientTokenExpiryMs = 0L
+    private var cachedNuanceFetchedAtMs = 0L
+    @Volatile
+    private var clusterUpdateListener: ((String) -> Unit)? = null
+
+    fun setClusterUpdateListener(listener: ((String) -> Unit)?) {
+        clusterUpdateListener = listener
+    }
 
     @Volatile
     private var listeningHistoryBlockedUntilMs = 0L
@@ -769,6 +783,12 @@ object SpotifyCanvasClient {
             webTokenExpiryMs = 0
             activeWebCookie = null
         }
+        clientTokenMutex.withLock {
+            clientToken = null
+            clientTokenExpiryMs = 0
+        }
+        cachedNuance = null
+        cachedNuanceFetchedAtMs = 0L
         listeningHistoryBlockedUntilMs = 0
         listeningHistorySessions.clear()
         webPlayerAutoplayQueueCache.clear()
@@ -799,13 +819,19 @@ object SpotifyCanvasClient {
         val uri = resolveTrackUriForHistory(metadata, normalized) ?: return null
         val id = uri.spotifyTrackId() ?: return null
         if (refresh) {
-            val refreshed =
-                webPlayerAutoplayQueueRefreshMutex.withLock {
-                    val token = ensureWebToken(normalized)
-                    val device = ensureListeningHistoryDevice(normalized, token, SPOTIFY_HISTORY_DEVICE_NAME) ?: return@withLock false
-                    cacheSpotifyConnectClusterQueueFromEndpoint(normalized, token, device.webgateUrl, id, attempts = 2)
+            webPlayerAutoplayQueueRefreshMutex.withLock {
+                val token = ensureWebToken(normalized)
+                val device = ensureListeningHistoryDevice(normalized, token, SPOTIFY_HISTORY_DEVICE_NAME) ?: return@withLock
+                val clusterOk = cacheSpotifyConnectClusterQueueFromEndpoint(normalized, token, device.webgateUrl, id, attempts = 2)
+                if (!clusterOk) {
+                    val existing =
+                        webPlayerAutoplayQueueCache[id]
+                            ?.takeIf { System.currentTimeMillis() - it.cachedAt < SPOTIFY_WEB_PLAYER_QUEUE_CACHE_TTL_MS }
+                    if (existing == null) {
+                        requestListeningHistoryPlaybackState(normalized, token, uri, null, device)
+                    }
                 }
-            if (!refreshed) return null
+            }
         }
         val cached = webPlayerAutoplayQueueCache[id] ?: return null
         if (System.currentTimeMillis() - cached.cachedAt >= SPOTIFY_WEB_PLAYER_QUEUE_CACHE_TTL_MS) return null
@@ -1138,6 +1164,7 @@ object SpotifyCanvasClient {
         cookie: String,
         startedAtMs: Long,
         durationMs: Long,
+        initialPositionMs: Long = 0L,
         stateMachineId: String? = null,
         stateId: String? = null,
         playbackContextUri: String? = null,
@@ -1151,7 +1178,7 @@ object SpotifyCanvasClient {
             session.startMutex.withLock {
                 if (session.startReported.get()) return@withLock true
 
-                sendListeningHistoryStart(session, normalizedCookie, trackUri, trackId, durationMs, playbackContextUri, deviceName)
+                sendListeningHistoryStart(session, normalizedCookie, trackUri, trackId, durationMs, initialPositionMs, playbackContextUri, deviceName)
                     .also(session.startReported::set)
             }
         }
@@ -1162,6 +1189,7 @@ object SpotifyCanvasClient {
         trackUri: String,
         trackId: String,
         durationMs: Long,
+        initialPositionMs: Long,
         playbackContextUri: String?,
         deviceName: String,
     ): Boolean {
@@ -1207,9 +1235,11 @@ object SpotifyCanvasClient {
                             durationMs = durationMs,
                         ),
                     ),
+                webgateUrl = device.webgateUrl,
             )
         if (!batchReported) return false
 
+        val clampedStart = initialPositionMs.coerceIn(0L, session.durationMs.coerceAtLeast(0L))
         val beforeLoadReported =
             reportListeningHistoryState(
                 normalizedCookie = normalizedCookie,
@@ -1217,7 +1247,7 @@ object SpotifyCanvasClient {
                 session = session,
                 operation = "before-track-load",
                 debugSource = "before_track_load",
-                positionMs = 0L,
+                positionMs = clampedStart,
                 previousPositionMs = 0L,
                 durationMs = session.durationMs,
                 includePlaybackStats = false,
@@ -1226,14 +1256,15 @@ object SpotifyCanvasClient {
             )
         if (!beforeLoadReported) return false
 
+        val startedPos = if (clampedStart > 0L) clampedStart else session.durationMs.coerceIn(0L, 1_004L)
         return reportListeningHistoryState(
             normalizedCookie = normalizedCookie,
             trackId = trackId,
             session = session,
             operation = "start",
             debugSource = "started_playing",
-            positionMs = session.durationMs.coerceIn(0L, 1_004L),
-            previousPositionMs = 0L,
+            positionMs = startedPos,
+            previousPositionMs = clampedStart,
             durationMs = session.durationMs,
             includePlaybackStats = false,
             webToken = webToken,
@@ -1345,6 +1376,7 @@ object SpotifyCanvasClient {
                     normalizedCookie = normalizedCookie,
                     trackId = trackId,
                     events = events,
+                    webgateUrl = listeningHistoryDevice?.webgateUrl,
                 )
             if (!batchReported) {
                 session.finalized.set(false)
@@ -1452,6 +1484,7 @@ object SpotifyCanvasClient {
         trackId: String,
         operation: String,
         events: List<JsonObject>,
+        webgateUrl: String? = null,
     ): Boolean {
         val webToken =
             runCatching { ensureWebToken(normalizedCookie) }
@@ -1464,6 +1497,8 @@ object SpotifyCanvasClient {
                     )
                 }.getOrNull()
                 ?: return false
+        val resolvedClientToken = ensureClientTokenBestEffort(normalizedCookie)
+        val batchUrl = webgateUrl?.takeIf { it.isNotBlank() }?.let { "$it/melody/v1/msg/batch" } ?: SPOTIFY_HISTORY_BATCH_URL
 
         val payload =
             buildJsonObject {
@@ -1476,7 +1511,7 @@ object SpotifyCanvasClient {
         val request =
             Request
                 .Builder()
-                .url(SPOTIFY_HISTORY_BATCH_URL)
+                .url(batchUrl)
                 .header("User-Agent", DESKTOP_WEB_USER_AGENT)
                 .header("Accept", "*/*")
                 .header("Content-Type", "application/json")
@@ -1485,6 +1520,7 @@ object SpotifyCanvasClient {
                 .header("Origin", WEB_ORIGIN)
                 .header("Cookie", normalizedCookie)
                 .header("Authorization", "Bearer $webToken")
+                .apply { resolvedClientToken?.let { header("client-token", it) } }
                 .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
 
@@ -1526,6 +1562,7 @@ object SpotifyCanvasClient {
         normalizedCookie: String,
         trackId: String,
         events: List<JsonObject>,
+        webgateUrl: String? = null,
     ): Boolean {
         val webToken =
             runCatching { ensureWebToken(normalizedCookie) }
@@ -1538,6 +1575,8 @@ object SpotifyCanvasClient {
                     )
                 }.getOrNull()
                 ?: return false
+        val resolvedClientToken = ensureClientTokenBestEffort(normalizedCookie)
+        val batchUrl = webgateUrl?.takeIf { it.isNotBlank() }?.let { "$it/melody/v1/msg/batch" } ?: SPOTIFY_HISTORY_BATCH_URL
 
         val payload =
             buildJsonObject {
@@ -1550,7 +1589,7 @@ object SpotifyCanvasClient {
         val request =
             Request
                 .Builder()
-                .url(SPOTIFY_HISTORY_BATCH_URL)
+                .url(batchUrl)
                 .header("User-Agent", DESKTOP_WEB_USER_AGENT)
                 .header("Accept", "*/*")
                 .header("Content-Type", "application/json")
@@ -1559,6 +1598,7 @@ object SpotifyCanvasClient {
                 .header("Origin", WEB_ORIGIN)
                 .header("Cookie", normalizedCookie)
                 .header("Authorization", "Bearer $webToken")
+                .apply { resolvedClientToken?.let { header("client-token", it) } }
                 .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
 
@@ -1638,19 +1678,21 @@ object SpotifyCanvasClient {
                 ) ?: return false
 
         if (session.deviceId != resolvedDevice.deviceId) {
-            if (operation == "finalize") return true
-            val state =
-                requestListeningHistoryPlaybackState(
-                    normalizedCookie = normalizedCookie,
-                    webToken = resolvedWebToken,
-                    trackUri = session.trackUri,
-                    playbackContextUri = session.contextUri,
-                    device = resolvedDevice,
-                ) ?: return false
-            session.stateMachineId = state.stateMachineId
-            session.stateId = state.stateId
+            if (operation != "finalize") {
+                val state =
+                    requestListeningHistoryPlaybackState(
+                        normalizedCookie = normalizedCookie,
+                        webToken = resolvedWebToken,
+                        trackUri = session.trackUri,
+                        playbackContextUri = session.contextUri,
+                        device = resolvedDevice,
+                    ) ?: return false
+                session.stateMachineId = state.stateMachineId
+                session.stateId = state.stateId
+            }
             session.deviceId = resolvedDevice.deviceId
         }
+        val resolvedClientToken = ensureClientTokenBestEffort(normalizedCookie)
 
         val payload =
             buildSpotifyPlaybackStatePayload(
@@ -1675,6 +1717,7 @@ object SpotifyCanvasClient {
                 .header("Origin", WEB_ORIGIN)
                 .header("Cookie", normalizedCookie)
                 .header("Authorization", "Bearer $resolvedWebToken")
+                .apply { resolvedClientToken?.let { header("client-token", it) } }
                 .put(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
 
@@ -1918,6 +1961,7 @@ object SpotifyCanvasClient {
                     }
                 }
             }
+        val resolvedClientToken = ensureClientTokenBestEffort(normalizedCookie)
         val request =
             Request
                 .Builder()
@@ -1930,6 +1974,7 @@ object SpotifyCanvasClient {
                 .header("Origin", WEB_ORIGIN)
                 .header("Cookie", normalizedCookie)
                 .header("Authorization", "Bearer $webToken")
+                .apply { resolvedClientToken?.let { header("client-token", it) } }
                 .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
 
@@ -2088,7 +2133,13 @@ object SpotifyCanvasClient {
                     }
                     if (message.string("type") != "message") return
                     parseSpotifyDealerPlaybackCommand(message)?.let(commandQueue::offer)
-                    parseSpotifyDealerConnectCluster(message)?.let(::cacheSpotifyConnectClusterQueue)
+                    parseSpotifyDealerConnectCluster(message)?.let { cluster ->
+                        if (cacheSpotifyConnectClusterQueue(cluster)) {
+                            cluster.obj("player_state")?.obj("track")?.spotifyStateMachineTrackId()?.let { trackId ->
+                                clusterUpdateListener?.invoke(trackId)
+                            }
+                        }
+                    }
                     parseSpotifyDealerConnectionId(message)?.let { connectionId ->
                         if (deferred.complete(SpotifyDealerConnection(connectionId, webSocket, commandQueue))) {
                             Timber.d("Spotify Dealer connection id received")
@@ -2165,7 +2216,7 @@ object SpotifyCanvasClient {
                 ?.obj("cluster")
         }.getOrNull()
 
-    private fun registerListeningHistoryDevice(
+    private suspend fun registerListeningHistoryDevice(
         normalizedCookie: String,
         webToken: String,
         cookieHash: Int,
@@ -2190,6 +2241,7 @@ object SpotifyCanvasClient {
                 put("client_version", SPOTIFY_HISTORY_FINAL_SDK_ID)
                 put("volume", 65_535)
             }
+        val resolvedClientToken = ensureClientTokenBestEffort(normalizedCookie)
         val request =
             Request
                 .Builder()
@@ -2202,6 +2254,7 @@ object SpotifyCanvasClient {
                 .header("Origin", WEB_ORIGIN)
                 .header("Cookie", normalizedCookie)
                 .header("Authorization", "Bearer $webToken")
+                .apply { resolvedClientToken?.let { header("client-token", it) } }
                 .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
 
@@ -2237,7 +2290,7 @@ object SpotifyCanvasClient {
         }
     }
 
-    private fun registerSpotifyConnectObserverDevice(
+    private suspend fun registerSpotifyConnectObserverDevice(
         normalizedCookie: String,
         webToken: String,
         webgateUrl: String,
@@ -2245,6 +2298,7 @@ object SpotifyCanvasClient {
         connectionId: String,
     ): String? {
         val observerDeviceId = spotifyConnectObserverDeviceId(deviceId)
+        val resolvedClientToken = ensureClientTokenBestEffort(normalizedCookie)
         val payload =
             buildJsonObject {
                 put("member_type", "CONNECT_STATE")
@@ -2271,6 +2325,7 @@ object SpotifyCanvasClient {
                 .header("Origin", WEB_ORIGIN)
                 .header("Cookie", normalizedCookie)
                 .header("Authorization", "Bearer $webToken")
+                .apply { resolvedClientToken?.let { header("client-token", it) } }
                 .put(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
 
@@ -2518,8 +2573,9 @@ object SpotifyCanvasClient {
         webToken: String,
         webgateUrl: String,
         expectedCurrentTrackId: String,
-    ): Boolean =
-        withContext(Dispatchers.IO) {
+    ): Boolean {
+        val resolvedClientToken = ensureClientTokenBestEffort(normalizedCookie)
+        return withContext(Dispatchers.IO) {
             val request =
                 Request
                     .Builder()
@@ -2531,6 +2587,7 @@ object SpotifyCanvasClient {
                     .header("Origin", WEB_ORIGIN)
                     .header("Cookie", normalizedCookie)
                     .header("Authorization", "Bearer $webToken")
+                    .apply { resolvedClientToken?.let { header("client-token", it) } }
                     .get()
                     .build()
 
@@ -2556,6 +2613,7 @@ object SpotifyCanvasClient {
                 Timber.w(error, "Spotify Connect cluster fetch failed")
             }.getOrDefault(false)
         }
+    }
 
     internal fun cacheSpotifyConnectClusterQueue(
         cluster: JsonObject,
@@ -6708,8 +6766,9 @@ object SpotifyCanvasClient {
         normalizedCookie: String,
         operation: String,
         body: RequestBody,
-    ): JsonObject =
-        withContext(Dispatchers.IO) {
+    ): JsonObject {
+        val resolvedClientToken = ensureClientTokenBestEffort(normalizedCookie)
+        return withContext(Dispatchers.IO) {
             val request =
                 Request
                     .Builder()
@@ -6719,6 +6778,7 @@ object SpotifyCanvasClient {
                     .header("Content-Type", "application/json")
                     .header("Cookie", normalizedCookie)
                     .header("Authorization", "Bearer ${ensureToken(normalizedCookie)}")
+                    .apply { resolvedClientToken?.let { header("client-token", it) } }
                     .post(body)
                     .build()
 
@@ -6726,6 +6786,7 @@ object SpotifyCanvasClient {
                 json.parseToJsonElement(response.requireBody(operation)).jsonObject
             }
         }
+    }
 
     private suspend fun resolveSavedTracksFromWebApi(
         normalizedCookie: String,
@@ -7975,8 +8036,10 @@ object SpotifyCanvasClient {
             }
         }
 
-    private suspend fun getLatestNuance(): SpotifyNuance =
-        cachedNuance ?: withContext(Dispatchers.IO) {
+    private suspend fun getLatestNuance(): SpotifyNuance {
+        val now = System.currentTimeMillis()
+        cachedNuance?.takeIf { now - cachedNuanceFetchedAtMs < NUANCE_CACHE_TTL_MS }?.let { return it }
+        return withContext(Dispatchers.IO) {
             val request =
                 Request
                     .Builder()
@@ -8007,7 +8070,66 @@ object SpotifyCanvasClient {
                         ?: error("Spotify nuance gist returned no usable entries")
 
                 cachedNuance = nuance
+                cachedNuanceFetchedAtMs = System.currentTimeMillis()
                 nuance
+            }
+        }
+    }
+
+    private suspend fun ensureClientTokenBestEffort(normalizedCookie: String): String? =
+        runCatching { ensureClientToken(normalizedCookie) }
+            .onFailure { error ->
+                if (error is CancellationException) throw error
+                Timber.d(error, "Spotify client-token fetch skipped")
+            }.getOrNull()
+
+    private suspend fun ensureClientToken(normalizedCookie: String): String =
+        clientTokenMutex.withLock {
+            clientToken
+                ?.takeIf { System.currentTimeMillis() < clientTokenExpiryMs }
+                ?.let { return it }
+
+            val deviceId =
+                extractSpotifyCookieValue(normalizedCookie, "sp_t")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: randomSpotifyDeviceId()
+            val payload =
+                buildJsonObject {
+                    putJsonObject("client_data") {
+                        put("client_version", CLIENT_TOKEN_APP_VERSION)
+                        put("client_id", WEB_PLAYER_CLIENT_ID)
+                        putJsonObject("js_sdk_data") {
+                            put("device_brand", "unknown")
+                            put("device_model", "unknown")
+                            put("os", "windows")
+                            put("os_version", "NT 10.0")
+                            put("device_id", deviceId)
+                            put("device_type", "computer")
+                        }
+                    }
+                }
+            val request =
+                Request
+                    .Builder()
+                    .url(CLIENT_TOKEN_URL)
+                    .header("User-Agent", DESKTOP_WEB_USER_AGENT)
+                    .header("Accept", "application/json")
+                    .header("Origin", WEB_ORIGIN)
+                    .header("Referer", WEB_REFERER)
+                    .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
+                    .build()
+
+            withContext(Dispatchers.IO) {
+                client.newCall(request).execute().use { response ->
+                    val root = json.parseToJsonElement(response.requireBody("Spotify client token")).jsonObject
+                    val granted = root.obj("granted_token")
+                    val value = granted?.string("token")?.takeIf { it.isNotBlank() }
+                        ?: error("Spotify client token response missing granted_token.token")
+                    val refreshSeconds = granted.long("refresh_after_seconds") ?: 1200L
+                    clientToken = value
+                    clientTokenExpiryMs = System.currentTimeMillis() + (refreshSeconds * 1000L).coerceAtLeast(60_000L) - 30_000L
+                    value
+                }
             }
         }
 
@@ -8538,12 +8660,15 @@ object SpotifyCanvasClient {
     private data class WebTokenResponse(
         val accessToken: String? = null,
         val accessTokenExpirationTimestampMs: Long? = null,
+        val isAnonymous: Boolean? = null,
     ) {
-        fun toToken(): WebAccessToken =
-            WebAccessToken(
+        fun toToken(): WebAccessToken {
+            if (isAnonymous == true) error("Spotify session cookie is expired or anonymous")
+            return WebAccessToken(
                 accessToken = accessToken ?: error("Spotify web token response missing accessToken"),
                 expiresAtMs = accessTokenExpirationTimestampMs ?: (System.currentTimeMillis() + 3_000_000L),
             )
+        }
     }
 
     private suspend fun resolveSpotifyGraphPlaylistTrackPage(

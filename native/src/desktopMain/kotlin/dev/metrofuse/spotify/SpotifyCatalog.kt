@@ -23,7 +23,7 @@ internal class SpotifyCatalog(
 
     override suspend fun search(request: SearchRequest): SearchResult {
         if (request.query.isBlank()) return SearchResult(emptyList())
-        return plugin.account { cookie ->
+        return plugin.accountIfSignedIn { cookie ->
             val items =
                 SpotifyCanvasClient
                     .resolveSearchSummaryPage(request.query, cookie)
@@ -37,11 +37,11 @@ internal class SpotifyCatalog(
                 items.filterIsInstance<ArtistItem>().take(limit).map { it.artist() },
                 playlists = items.filterIsInstance<PlaylistItem>().take(limit).map { it.playlist() },
             )
-        }
+        } ?: SearchResult(emptyList())
     }
 
     override suspend fun album(id: String): CatalogAlbum? =
-        plugin.account {
+        plugin.accountIfSignedIn {
             SpotifyCanvasClient.resolveAlbum(id, it)?.let { page ->
                 CatalogAlbum(
                     page.playlist.id,
@@ -58,8 +58,8 @@ internal class SpotifyCatalog(
         }
 
     override suspend fun artist(id: String): CatalogArtist? =
-        plugin.account {
-            val page = SpotifyCanvasClient.resolveArtist(id, it) ?: return@account null
+        plugin.accountIfSignedIn {
+            val page = SpotifyCanvasClient.resolveArtist(id, it) ?: return@accountIfSignedIn null
             val overview = SpotifyCanvasClient.resolveArtistOverview(id, it)
             CatalogArtist(
                 page.playlist.id,
@@ -73,7 +73,7 @@ internal class SpotifyCatalog(
         }
 
     override suspend fun playlist(id: String): CatalogPlaylist? =
-        plugin.account {
+        plugin.accountIfSignedIn {
             SpotifyCanvasClient.resolvePlaylist(id, it)?.let { page ->
                 page.playlist.playlist(page.songs.map { it.track(page.playlist.id) })
             }
@@ -182,7 +182,7 @@ internal class SpotifyCatalog(
 
     override suspend fun lyrics(request: LyricsRequest): LyricsResult? {
         if (!enabled("lyricsEnabled")) return null
-        return plugin.account { cookie ->
+        return plugin.accountIfSignedIn { cookie ->
             SpotifyCanvasClient
                 .resolveLyrics(
                     request.title,

@@ -18,8 +18,8 @@ export function cookieInput(value) {
   return [...values].map(([k,v])=>k+'='+v).join('; ');
 }
 export class SpotifySession {
-  constructor(host) { this.host=host;this.cookie=null;this.revision=0;this.tokenCache=null;this.pendingToken=null;this.desktopCache=null;this.pendingDesktop=null;this.nuance=null;this.hashes=new Map(Object.entries({decorateContextTracks:'383de00240775c39a6afe0b1055dc562b2a3930894201f9762f3fc32a74971c7',home:'d62af2714f2623c923cc9eeca4b9545b4363abaa9188a9e94e2b63b823419a2c',fetchPlaylistMetadata:'a65e12194ed5fc443a1cdebed5fabe33ca5b07b987185d63c72483867ad13cb4',getAlbumNameAndTracks:'8628ad33de3267d7bef516c76a746979a5f98891a2c9eaff3dfec828abdcd983',getArtistNameAndTracks:'0adaf1a1a8a94c7ed095639c4d9456d2b1cfac16ac511d5dd2b01b6dd89f748a'}));this.bundles=new Map(); }
-  clear() { this.revision++;this.cookie=null;this.tokenCache=null;this.pendingToken=null;this.desktopCache=null;this.pendingDesktop=null; }
+  constructor(host) { this.host=host;this.cookie=null;this.revision=0;this.tokenCache=null;this.pendingToken=null;this.desktopCache=null;this.pendingDesktop=null;this.clientTokenCache=null;this.pendingClientToken=null;this.nuance=null;this.nuanceFetchedAt=0;this.hashes=new Map(Object.entries({decorateContextTracks:'383de00240775c39a6afe0b1055dc562b2a3930894201f9762f3fc32a74971c7',home:'d62af2714f2623c923cc9eeca4b9545b4363abaa9188a9e94e2b63b823419a2c',fetchPlaylistMetadata:'a65e12194ed5fc443a1cdebed5fabe33ca5b07b987185d63c72483867ad13cb4',getAlbumNameAndTracks:'8628ad33de3267d7bef516c76a746979a5f98891a2c9eaff3dfec828abdcd983',getArtistNameAndTracks:'0adaf1a1a8a94c7ed095639c4d9456d2b1cfac16ac511d5dd2b01b6dd89f748a'}));this.bundles=new Map(); }
+  clear() { this.revision++;this.cookie=null;this.tokenCache=null;this.pendingToken=null;this.desktopCache=null;this.pendingDesktop=null;this.clientTokenCache=null;this.pendingClientToken=null;this.nuance=null;this.nuanceFetchedAt=0; }
   snapshot(cookie=this.cookie) { if(!cookie)throw Error('LOGIN_REQUIRED');return {cookie,revision:this.revision}; }
   check(snapshot) { if(snapshot.revision!==this.revision)throw Error('ACCOUNT_CHANGED'); }
   async request(request) {
@@ -33,10 +33,11 @@ export class SpotifySession {
     if(!force&&this.tokenCache?.cookie===snapshot.cookie&&this.tokenCache.expires>Date.now())return this.tokenCache.value;
     if(!force&&this.pendingToken?.cookie===snapshot.cookie)return this.pendingToken.promise;
     const promise=(async()=>{
-      if(!this.nuance) {
+      if(!this.nuance || (this.nuanceFetchedAt && Date.now()-this.nuanceFetchedAt>=3600000)) {
         const gist=await this.publicJson('https://api.github.com/gists/22ed9c6ba463899e933427f7de1f0eef');
         const entries=JSON.parse(gist.files?.['nuances.json']?.content??'null');
         this.nuance=Array.isArray(entries)?entries.filter(x=>typeof x.s==='string'&&Number.isInteger(x.v)).sort((a,b)=>b.v-a.v)[0]:null;
+        this.nuanceFetchedAt=Date.now();
         if(!this.nuance)throw Error('SPOTIFY_TOTP_UNAVAILABLE');
       }
       const time=await this.publicJson('https://open.spotify.com/api/server-time');
@@ -55,10 +56,30 @@ export class SpotifySession {
     this.pendingToken={cookie:snapshot.cookie,promise};
     try{return await promise;}finally{if(this.pendingToken?.promise===promise)this.pendingToken=null;}
   }
+  async clientToken(snapshot=this.snapshot()) {
+    this.check(snapshot);
+    if(this.clientTokenCache?.cookie===snapshot.cookie&&this.clientTokenCache.expires>Date.now())return this.clientTokenCache.value;
+    if(this.pendingClientToken?.cookie===snapshot.cookie)return this.pendingClientToken.promise;
+    const promise=(async()=>{
+      try {
+        const deviceId=snapshot.cookie.split('; ').find(x=>x.startsWith('sp_t='))?.slice(5)||Array.from({length:32},()=>Math.floor(Math.random()*16).toString(16)).join('');
+        const response=await this.request({url:'https://clienttoken.spotify.com/v1/clienttoken',method:'POST',headers:{Accept:'application/json','Content-Type':'application/json',Origin:'https://open.spotify.com',Referer:'https://open.spotify.com/'},body:JSON.stringify({client_data:{client_version:'1.2.66.447.g86d422d1',client_id:'d8a5ed958d274c2e8ee717e6a4b0971d',js_sdk_data:{device_brand:'unknown',device_model:'unknown',os:'windows',os_version:'NT 10.0',device_id:deviceId,device_type:'computer'}}})});
+        if(response.status!==200)return null;
+        const parsed=JSON.parse(response.body),granted=parsed?.granted_token;
+        if(!granted?.token)return null;
+        const ttlMs=Math.max(60000,(Number(granted.refresh_after_seconds)||1200)*1000-30000);
+        this.clientTokenCache={cookie:snapshot.cookie,value:granted.token,expires:Date.now()+ttlMs};
+        return granted.token;
+      } catch { return null; }
+    })();
+    this.pendingClientToken={cookie:snapshot.cookie,promise};
+    try{return await promise;}finally{if(this.pendingClientToken?.promise===promise)this.pendingClientToken=null;}
+  }
   async auth(url,{method='GET',body,headers={},desktop=false,...options}={},snapshot=this.snapshot(),retry=true) {
     let token;
     try{token=desktop?await this.desktopToken(snapshot):await this.token(snapshot);}catch(error){this.check(snapshot);if(desktop)throw error;desktop=true;token=await this.desktopToken(snapshot);}
-    const response=await this.request({url,method,body,headers:{Accept:'application/json','App-Platform':'WebPlayer',Referer:'https://open.spotify.com/',Origin:'https://open.spotify.com',Cookie:snapshot.cookie,Authorization:'Bearer '+token,...headers},...options});
+    const ct=(url.includes('spclient')||url.includes('api-partner.spotify.com'))?await this.clientToken(snapshot):null;
+    const response=await this.request({url,method,body,headers:{Accept:'application/json','App-Platform':'WebPlayer',Referer:'https://open.spotify.com/',Origin:'https://open.spotify.com',Cookie:snapshot.cookie,Authorization:'Bearer '+token,...(ct?{'client-token':ct}:{}),...headers},...options});
     this.check(snapshot);
     if(response.status===401&&retry){if(desktop)this.desktopCache=null;else await this.token(snapshot,true);return this.auth(url,{method,body,headers,desktop,...options},snapshot,false);}
     if(response.status===403&&retry&&!desktop)return this.auth(url,{method,body,headers,desktop:true,...options},snapshot,false);
@@ -96,7 +117,7 @@ export class SpotifySession {
     this.check(snapshot);if(this.desktopCache?.cookie===snapshot.cookie&&this.desktopCache.expires>Date.now())return this.desktopCache.value;
     if(this.pendingDesktop?.cookie===snapshot.cookie)return this.pendingDesktop.promise;
     const promise=(async()=>{
-      const clientId='65b708073fc0480ea92a077233ca87bd',scope='playlist-read,playlist-read-collaborative,playlist-read-private,user-follow-read,user-library-modify,user-library-read,user-personalized,user-read-play-history,user-read-playback-position,user-read-playback-state,user-read-private,user-read-recently-played,user-top-read';
+      const clientId='65b708073fc0480ea92a077233ca87bd',scope='app-remote-control,playlist-read,playlist-read-collaborative,playlist-read-private,streaming,transfer-auth-session,user-follow-read,user-library-modify,user-library-read,user-modify,user-modify-playback-state,user-modify-private,user-personalized,user-read-currently-playing,user-read-play-history,user-read-playback-position,user-read-playback-state,user-read-private,user-read-recently-played,user-top-read';
       const form=values=>Object.entries(values).map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).join('&');
       const authorization=await this.request({url:'https://accounts.spotify.com/oauth2/device/authorize',method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:form({client_id:clientId,scope})});
       if(authorization.status!==200)throw Error('SPOTIFY_DEVICE_AUTH_HTTP_'+authorization.status);

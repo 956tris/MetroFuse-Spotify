@@ -11,38 +11,48 @@ function playbackTrackId(item) {
   return entityId(item?.extras?.['spotify.uri']) ??
     entityId(id?.startsWith(SPOTIFY_TRACK_PREFIX) ? id.slice(SPOTIFY_TRACK_PREFIX.length) : id);
 }
-export function machineTrack(value) {
+export function machineTrackId(value) {
   if(!value)return null;const meta=value.metadata??value;
   const uri=value.uri??value.track_uri??value.trackUri??meta.track_uri??meta.trackUri??meta.entity_uri??meta.entityUri??meta.uri;
   if(String(uri??'').startsWith('spotify:ad:')||/^(ad|advertisement)$/i.test(value.type??meta.type??''))return null;
   let id=entityId(uri)??entityId(value.id);
   if(!id){try{const gid=value.gid??meta.gid;const bytes=/^[a-f0-9]{32}$/i.test(gid??'')?gid.match(/../g).map(x=>parseInt(x,16)):unbase64(gid);if(bytes.length===16){let n=bytes.reduce((n,b)=>n*256n+BigInt(b),0n),out='';const alphabet='0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';do{out=alphabet[Number(n%62n)]+out;n/=62n;}while(n);id=out.padStart(22,'0');}}catch{}}
-  if(!id)return null;
+  return id;
+}
+export function machineTrack(value) {
+  const id=machineTrackId(value);if(!id)return null;const meta=value.metadata??value;
   const artists=Array.isArray(meta.artists)?meta.artists:Array.isArray(value.artists)?value.artists:[{name:meta.artist_name??meta.artist??meta.artistName}].filter(x=>x.name);
   const album={name:meta.group_name??meta.album_name??meta.albumName??meta.album??value.album?.name??'',uri:meta.group_uri??meta.album_uri??value.album?.uri,
     images:[{url:meta.image_url??meta.imageUrl??meta.image??meta.cover_url??value.album?.images?.[0]?.url??''}]};
   const duration=Number(meta.duration??meta.duration_ms??value.duration_ms??0);
   return track({uri:'spotify:track:'+id,name:meta.name??meta.title??value.name??value.title,artists,album,duration_ms:duration,explicit:meta.is_explicit===true||meta.explicit===true||meta.explicit==='true'});
 }
-export function stateMachineQueue(machine,reference) {
+function queueTrackEntry(value) {
+  const full=machineTrack(value);if(full)return full;
+  const id=machineTrackId(value);if(!id)return null;
+  return {id:'spotify:track:'+id,uri:'spotify:track:'+id,_sparse:true};
+}
+export function stateMachineQueue(machine,reference,{allowSparse=false}={}) {
   const states=machine?.states,tracks=machine?.tracks,index=Number(reference?.state_index);
   if(!Array.isArray(states)||!Array.isArray(tracks)||!Number.isInteger(index)||index<0||index>=states.length)return null;
-  const current=states[index],stateId=current?.state_id,machineId=machine.state_machine_id;if(!machineTrack(tracks[current?.track]))return null;
+  const parse=allowSparse?queueTrackEntry:machineTrack;
+  const current=states[index],stateId=current?.state_id,machineId=machine.state_machine_id;if(!parse(tracks[current?.track]))return null;
   const result=[],seen=new Set();let cursor=index,malformed=false;
   while(Number.isInteger(cursor)&&cursor>=0&&cursor<states.length&&!seen.has(cursor)&&result.length<100) {
-    seen.add(cursor);const state=states[cursor],item=machineTrack(tracks[state?.track]);if(!item){malformed=true;break;}result.push(item);
+    seen.add(cursor);const state=states[cursor],item=parse(tracks[state?.track]);if(!item){malformed=true;break;}result.push(item);
     const next=state.transitions?.show_next;cursor=next?.state_index;if(next&&(!Number.isInteger(cursor)||cursor<0||cursor>=states.length)){malformed=true;break;}
   }
   if(!result.length||!stateId||!machineId)return null;
   const raw=tracks[current.track];
-  return {tracks:result,currentIndex:0,complete:!malformed&&cursor==null,
+  return {tracks:result,currentIndex:0,complete:!malformed&&(cursor==null||result.length>=100),
     stateMachineId:machineId,stateId,paused:reference.paused===true,playbackId:raw?.logData?.playbackId??raw?.log_data?.playback_id,
-    durationMs:Number(current.duration_override??raw?.metadata?.duration??result[0].duration)};
+    durationMs:Number(current.duration_override??raw?.metadata?.duration??result[0].duration??0)};
 }
-export function clusterQueue(value) {
+export function clusterQueue(value,{allowSparse=false}={}) {
   const state=value?.cluster?.player_state??value?.player_state;if(!state?.track)return null;
-  const current=machineTrack(state.track);if(!current)return null;
-  if(!Array.isArray(state.next_tracks))return null;const upcoming=state.next_tracks.map(machineTrack);if(upcoming.some(item=>!item))return null;const tracks=[current,...upcoming];
+  const parse=allowSparse?queueTrackEntry:machineTrack;
+  const current=parse(state.track);if(!current)return null;
+  if(!Array.isArray(state.next_tracks))return null;const upcoming=state.next_tracks.map(parse);if(upcoming.some(item=>!item))return null;const tracks=[current,...upcoming];
   return {tracks,currentIndex:0,contextUri:state.context_uri??state.context?.uri,complete:true};
 }
 export function dealerMessage(message) {
@@ -72,10 +82,17 @@ export function historyEvents(session,kind,position=0,nextPlaybackId='',endPosit
   return [{type:'jssdk_playback_stats',message:stats},{type:'track_stream_verification',message:{...common,ms_played:position,ms_nominal_played:position,sequence_id:1,next_playback_id:nextPlaybackId,playback_service:'web_player'}}];
 }
 export class SpotifyWebPlayer {
-  constructor(session,catalog) {this.auth=session;this.catalog=catalog;this.host=session.host;this.device=null;this.current=null;this.queueCache=null;this.openPromise=null;this.commands=[];this.blockedUntil=0;this.tail=Promise.resolve();this.stopped=false;this.lastSessionTime=0;}
+  constructor(session,catalog) {this.auth=session;this.catalog=catalog;this.host=session.host;this.device=null;this.current=null;this.queueCache=null;this.openPromise=null;this.commands=[];this.blockedUntil=0;this.tail=Promise.resolve();this.stopped=false;this.lastSessionTime=0;this.resolvedCache=new Map();this.pendingObservation=null;}
   check(snapshot) {this.auth.check(snapshot);if(this.stopped)throw Error('PLUGIN_STOPPED');}
   enqueue(fn) {const result=this.tail.then(fn);this.tail=result.catch(error=>{if(error.message!=='ACCOUNT_CHANGED'&&error.message!=='PLUGIN_STOPPED'){const code=/^SPOTIFY_[A-Z_0-9]+$/.test(error.message)?error.message:'UNKNOWN_ERROR';this.host.log('Spotify Web Player operation failed ('+code+')');}});return result;}
-  async post(path,body,snapshot,method='POST') {return this.auth.json(this.device.webgate+path,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},snapshot);}
+  async post(path,body,snapshot,method='POST') {
+    try{return await this.auth.json(this.device.webgate+path,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},snapshot);}
+    catch(error){
+      if(error.message==='SPOTIFY_HTTP_429')this.blockedUntil=Date.now()+120000;
+      if(['SPOTIFY_HTTP_404','SPOTIFY_HTTP_409','SPOTIFY_HTTP_410'].includes(error.message))await this.closeDevice();
+      throw error;
+    }
+  }
   async open(snapshot=this.auth.snapshot()) {
     this.check(snapshot);if(Date.now()<this.blockedUntil)throw Error('SPOTIFY_HISTORY_BACKOFF');
     if(this.device?.revision===snapshot.revision&&Date.now()-this.device.created<2700000)return this.device;
@@ -86,7 +103,9 @@ export class SpotifyWebPlayer {
       const endpoints=await this.auth.publicJson('https://apresolve.spotify.com/?type=dealer-g2&type=spclient');
       const dealer=endpoints['dealer-g2']?.[0],webgate=endpoints.spclient?.[0];
       if(typeof dealer!=='string'||typeof webgate!=='string'||![dealer,webgate].every(x=>/^[A-Za-z0-9.-]+\.spotify\.com(?::443)?$/.test(x)))throw Error('INVALID_SPOTIFY_ENDPOINT');
-      const token=await this.auth.token(snapshot),id=await this.host.socket.open({url:'wss://'+dealer.replace(/:443$/,'')+'?access_token='+encodeURIComponent(token)});
+      let token;
+      try{token=await this.auth.token(snapshot);}catch(error){this.check(snapshot);token=await this.auth.desktopToken(snapshot);}
+      const id=await this.host.socket.open({url:'wss://'+dealer.replace(/:443$/,'')+'?access_token='+encodeURIComponent(token)});
       try{this.check(snapshot);}catch(error){await this.host.socket.close(id);throw error;}
       const device={id,revision:snapshot.revision,webgate:'https://'+webgate.replace(/:443$/,''),deviceId:randomId(40),created:Date.now(),sequence:0,unsubscribe:null};this.device=device;
       try {
@@ -116,8 +135,8 @@ export class SpotifyWebPlayer {
     }
     this.check(snapshot);
     if(message.connectionId)device.connectionId=message.connectionId;
-    if(message.cluster){const queue=clusterQueue(message.cluster);if(queue)this.queueCache={...queue,revision:snapshot.revision,at:Date.now()};}
-    if(message.command){const queue=stateMachineQueue(message.command.state_machine,message.command.state_ref);if(queue)this.queueCache={...queue,revision:snapshot.revision,at:Date.now()};this.commands.push(message.command);while(this.commands.length>16)this.commands.shift();}
+    if(message.cluster){const queue=clusterQueue(message.cluster,{allowSparse:true});if(queue)this.queueCache={...queue,revision:snapshot.revision,at:Date.now()};}
+    if(message.command){const queue=stateMachineQueue(message.command.state_machine,message.command.state_ref,{allowSparse:true});if(queue)this.queueCache={...queue,revision:snapshot.revision,at:Date.now()};this.commands.push(message.command);while(this.commands.length>16)this.commands.shift();}
     return true;
   }
   async waitCommand(snapshot) {
@@ -134,26 +153,52 @@ export class SpotifyWebPlayer {
           {command:{endpoint:'play',context:{uri:context,url:'context://'+context},play_origin:{feature_identifier:'web-player',feature_version:SDK},options:{license:'',skip_to:{track_uri:uri},initially_paused:false},logging_params:{page_instance_ids:[],interaction_ids:[],command_id:randomId()}}},snapshot);
         let command=await this.waitCommand(snapshot);this.check(snapshot);
         for(let n=0;n<8;n++) {
-          const parsed=stateMachineQueue(command.state_machine,command.state_ref);
+          const parsed=stateMachineQueue(command.state_machine,command.state_ref,{allowSparse:true});
           if(parsed&&entityId(parsed.tracks[0].id)===id){this.queueCache={...parsed,contextUri:context,revision:snapshot.revision,at:Date.now()};return parsed;}
           command=await this.waitCommand(snapshot);this.check(snapshot);
         }
       }catch(error){this.check(snapshot);if(error.message==='SPOTIFY_DEALER_CLOSED')throw error;if(error.message==='SPOTIFY_HTTP_429'){this.blockedUntil=Date.now()+120000;throw error;}}
     }throw Error('SPOTIFY_PLAYBACK_STATE_UNAVAILABLE');
   }
+  async hydrateQueue(queueObj,snapshot) {
+    if(!queueObj)return null;
+    if(!queueObj.tracks.some(item=>item._sparse||!item.artist))return queueObj;
+    if(!this.catalog?.hydrate)return queueObj.tracks.every(item=>!item._sparse)?queueObj:null;
+    const hydrated=await this.catalog.hydrate(queueObj.tracks,snapshot);this.check(snapshot);
+    const byId=new Map(hydrated.map(item=>[entityId(item.id),item]));
+    const resolved=queueObj.tracks.map(item=>{
+      const full=byId.get(entityId(item.id));
+      if(item._sparse)return full??null;
+      return (!item.artist&&full)?full:item;
+    });
+    if(resolved.some(item=>!item))return null;
+    return {...queueObj,tracks:resolved};
+  }
   async fetchQueue(snapshot,expectedId) {
-    await this.open(snapshot);const root=await this.auth.json(this.device.webgate+'/connect-state/v1/cluster',{},snapshot),queue=clusterQueue(root);
+    await this.open(snapshot);const root=await this.auth.json(this.device.webgate+'/connect-state/v1/cluster',{},snapshot),queue=clusterQueue(root,{allowSparse:true});
     if(queue&&(!expectedId||entityId(queue.tracks[0].id)===expectedId)){this.queueCache={...queue,revision:snapshot.revision,at:Date.now()};return queue;}return null;
   }
+  async resolveTrack(item,identity) {
+    if(playbackTrackId(item))return item;
+    const key=item?.id??identity?.canonicalId;
+    if(key&&this.resolvedCache.has(key))return this.resolvedCache.get(key);
+    if(!this.catalog?.resolve)return null;
+    const resolved=await this.catalog.resolve({track:item,identity});
+    if(key&&resolved){this.resolvedCache.set(key,resolved);while(this.resolvedCache.size>256)this.resolvedCache.delete(this.resolvedCache.keys().next().value);}
+    return resolved;
+  }
   async queue(request={}) {
-    const snapshot=this.auth.snapshot();let item=request.track??(request.identity?await this.catalog.resolve(request):this.host.playerState()?.track);
-    if(item&&!playbackTrackId(item))item=await this.catalog.resolve({track:item,identity:request.identity});this.check(snapshot);const id=playbackTrackId(item);
+    const snapshot=this.auth.snapshot();let item=request.track??(request.identity?await this.resolveTrack(null,request.identity):this.host.playerState()?.track);
+    if(item&&!playbackTrackId(item))item=await this.resolveTrack(item,request.identity);this.check(snapshot);const id=playbackTrackId(item);
     if(request.track&&!id)return {tracks:[],source:'spotify-web-player',complete:false};
     let cached=this.queueCache?.revision===snapshot.revision&&Date.now()-this.queueCache.at<600000?this.queueCache:null;
     if(request.refresh||!cached||(id&&entityId(cached.tracks[0].id)!==id)) {
-      await this.open(snapshot);cached=await this.fetchQueue(snapshot,id);
-      if(!cached&&id)cached=await this.requestState(item,snapshot,request.contextUri??item.extras?.['spotify.contextUri']);
+      await this.open(snapshot);
+      const fromCluster=await this.fetchQueue(snapshot,id);
+      if(fromCluster)cached=fromCluster;
+      else if(id&&(!cached||entityId(cached.tracks[0].id)!==id))cached=await this.requestState(item,snapshot,request.contextUri??item.extras?.['spotify.contextUri']);
     }
+    cached=await this.hydrateQueue(cached,snapshot);
     if(!cached)return {tracks:[],source:'spotify-web-player',complete:false};
     return {tracks:cached.tracks.slice((cached.currentIndex??0)+1),current:cached.tracks[cached.currentIndex??0],contextUri:cached.contextUri,source:'spotify-web-player',complete:cached.complete};
   }
@@ -161,39 +206,45 @@ export class SpotifyWebPlayer {
     const current=this.current;if(!current)return;
     const device=await this.open(snapshot);
     if(current.deviceId&&current.deviceId!==device.deviceId) {
-      if(data.source==='track_data_finalized')return;
-      const state=await this.requestState({id:current.trackUri},snapshot,current.contextUri);
-      current.stateMachineId=state.stateMachineId;
-      current.stateId=state.stateId;
+      if(data.source!=='track_data_finalized') {
+        const state=await this.requestState({id:current.trackUri},snapshot,current.contextUri);
+        current.stateMachineId=state.stateMachineId;
+        current.stateId=state.stateId;
+      }
       current.deviceId=device.deviceId;
     }
     const payload=statePayload(current,data,++device.sequence);
     const response=await this.post('/track-playback/v1/devices/'+device.deviceId+'/state',payload,snapshot,'PUT');this.check(snapshot);
-    const parsed=stateMachineQueue(response.state_machine,response.updated_state_ref);
-    if(parsed&&entityId(parsed.tracks[0].id)===entityId(current.trackUri)){current.stateMachineId=parsed.stateMachineId;current.stateId=parsed.stateId;current.playbackId=parsed.playbackId??current.playbackId;this.queueCache={...parsed,revision:snapshot.revision,at:Date.now()};}
-    try{await this.fetchQueue(snapshot,entityId(current.trackUri));}catch(error){this.check(snapshot);}
+    const parsed=stateMachineQueue(response.state_machine,response.updated_state_ref,{allowSparse:true});
+    if(parsed&&entityId(parsed.tracks[0].id)===entityId(current.trackUri)){
+      current.stateMachineId=parsed.stateMachineId;current.stateId=parsed.stateId;current.playbackId=parsed.playbackId??current.playbackId;
+      const keepExisting=this.queueCache?.revision===snapshot.revision&&entityId(this.queueCache.tracks?.[0]?.id)===entityId(parsed.tracks[0].id)&&this.queueCache.tracks.length>parsed.tracks.length;
+      if(!keepExisting)this.queueCache={...parsed,contextUri:current.contextUri,revision:snapshot.revision,at:Date.now()};
+    }
   }
   async batch(events,snapshot) {
-    await this.auth.auth('https://gew1-spclient.spotify.com/melody/v1/msg/batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_version:'0.0.0',platform:PLATFORM,sdk_id:SDK,messages:events})},snapshot);
+    const webgate=this.device?.webgate??'https://gew1-spclient.spotify.com';
+    try{await this.auth.auth(webgate+'/melody/v1/msg/batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_version:'0.0.0',platform:PLATFORM,sdk_id:SDK,messages:events})},snapshot);}
+    catch(error){if(error.message==='SPOTIFY_HTTP_429')this.blockedUntil=Date.now()+120000;throw error;}
   }
-  async begin(item,playback,snapshot) {
-    if(typeof playback.playbackInstanceId!=='string'||!playback.playbackInstanceId.trim())return;
-    const resolved=playbackTrackId(item)?item:await this.catalog.resolve({track:item,identity:{canonicalId:item.id,isrc:item.extras?.isrc}});this.check(snapshot);
+  async begin(item,playback,snapshot,occurrence) {
+    const resolved=await this.resolveTrack(item,{canonicalId:item.id,isrc:item.extras?.isrc});this.check(snapshot);
     const id=playbackTrackId(resolved);if(!id)return;
     const contextUri=item.extras?.['spotify.contextUri'];
     const state=await this.requestState(resolved,snapshot,contextUri);this.check(snapshot);
-    const now=Date.now();this.lastSessionTime=Math.max(now,this.lastSessionTime+1);const current={trackUri:'spotify:track:'+id,hostTrackId:item.id,occurrence:playback.playbackInstanceId,
+    const now=Date.now();this.lastSessionTime=Math.max(now,this.lastSessionTime+1);const initialPos=Math.max(0,Number(playback.position)||0);
+    const current={trackUri:'spotify:track:'+id,hostTrackId:item.id,occurrence,
       stateMachineId:state.stateMachineId,stateId:state.stateId,playbackId:state.playbackId??randomId(),sessionId:String(this.lastSessionTime),correlationId:randomId(),startedAtMs:now,durationMs:state.durationMs||resolved.duration,
-      contextUri,deviceId:this.device?.deviceId,lastPosition:Number(playback.position)||0,lastTime:now,playing:playback.playing,playedMs:0,reported:false};
+      contextUri,deviceId:this.device?.deviceId,lastPosition:initialPos,lastTime:now,playing:playback.playing,playedMs:0,reported:false};
     this.current=current;
     try {
       await this.reportState({position:current.lastPosition,previousPosition:0,paused:!playback.playing,source:'before_track_load',stats:false},snapshot);
       await this.batch(historyEvents(current,'start'),snapshot);
+      await this.reportState({position:current.lastPosition,previousPosition:current.lastPosition,paused:!playback.playing,source:'started_playing',stats:false},snapshot);
     } catch(error) {
       if(this.current===current)this.current=null;
       throw error;
     }
-    await this.reportState({position:current.lastPosition,previousPosition:current.lastPosition,paused:!playback.playing,source:'started_playing',stats:false},snapshot);
   }
   async finish(snapshot) {
     const current=this.current;if(!current||current.finalized)return;this.check(snapshot);current.finalized=true;
@@ -203,16 +254,28 @@ export class SpotifyWebPlayer {
   async observe(playback) {
     if(this.stopped||!this.auth.cookie)return;
     const snapshot=this.auth.snapshot();this.check(snapshot);
-    if(this.device)for(let n=0;n<32;n++){if(!await this.read(this.device,0,snapshot))break;}
+    if(this.device) {
+      try{for(let n=0;n<32;n++){if(!await this.read(this.device,0,snapshot))break;}}
+      catch(error){if(error.message!=='SPOTIFY_DEALER_CLOSED')throw error;}
+    }
     const enabled=await this.host.settings.get('historyEnabled');this.check(snapshot);if(!enabled){if(this.current){this.current=null;await this.closeDevice();}return;}
-    const item=playback?.track;if(!item?.id){await this.finish(snapshot);return;}
-    const occurrence=typeof playback.playbackInstanceId==='string'&&playback.playbackInstanceId.trim()?playback.playbackInstanceId:null;
-    if(!occurrence){if(!playback.playing)await this.finish(snapshot);return;}
-    if(this.current&&(this.current.hostTrackId!==item.id||(occurrence!=null&&this.current.occurrence!==occurrence)))await this.finish(snapshot);
-    if(!this.current){if(playback.playing)await this.begin(item,playback,snapshot);return;}
+    const item=playback?.track;if(!item?.id){this.pendingObservation=null;await this.finish(snapshot);return;}
+    const explicitOccurrence=typeof playback.playbackInstanceId==='string'&&playback.playbackInstanceId.trim()?playback.playbackInstanceId:null;
+    const occurrence=explicitOccurrence??('track:'+item.id+':'+(playback.currentIndex??0));
+    if(!explicitOccurrence) {
+      if(!playback.playing){this.pendingObservation=null;await this.finish(snapshot);return;}
+      const prev=this.pendingObservation,pos=Math.max(0,Number(playback.position)||0);
+      if(!this.current&&(prev?.trackId!==item.id||pos<=prev.position)){this.pendingObservation={trackId:item.id,position:pos};return;}
+      this.pendingObservation={trackId:item.id,position:pos};
+    } else {
+      this.pendingObservation=null;
+    }
+    if(this.current&&(this.current.hostTrackId!==item.id||(explicitOccurrence!=null&&this.current.occurrence!==explicitOccurrence&&!this.current.occurrence.startsWith('track:'))))await this.finish(snapshot);
+    if(!this.current){if(playback.playing)await this.begin(item,playback,snapshot,occurrence);return;}
+    if(explicitOccurrence!=null&&this.current.occurrence.startsWith('track:'))this.current.occurrence=explicitOccurrence;
     const current=this.current,now=Date.now(),position=Math.max(0,Number(playback.position)||0),previous=current.lastPosition,delta=position-previous;
-    if(current.playing)current.playedMs+=Math.min(Math.max(0,delta),Math.max(0,now-current.lastTime)+1500);
-    const sought=Math.abs(delta-(current.playing?now-current.lastTime:0))>1500;
+    const sought=Math.abs(delta-(current.playing?now-current.lastTime:0))>1500&&!(previous===0&&position===0);
+    if(current.playing&&!sought)current.playedMs+=Math.min(Math.max(0,delta),Math.max(0,now-current.lastTime)+1500);
     const changed=current.playing!==playback.playing;
     current.lastPosition=position;current.lastTime=now;current.playing=playback.playing;
     if(sought)await this.reportState({position,previousPosition:previous,paused:!playback.playing,source:'seek',stats:false},snapshot);
@@ -224,6 +287,6 @@ export class SpotifyWebPlayer {
     const device=this.device;this.device=null;this.commands=[];
     if(device){device.unsubscribe?.();try{await this.host.socket.close(device.id);}catch{}}
   }
-  async reset() {this.current=null;this.queueCache=null;this.blockedUntil=0;await this.closeDevice();}
-  async stop() {this.stopped=true;this.current=null;this.queueCache=null;await this.closeDevice();}
+  async reset() {this.current=null;this.queueCache=null;this.blockedUntil=0;this.pendingObservation=null;this.resolvedCache.clear();await this.closeDevice();}
+  async stop() {this.stopped=true;this.current=null;this.queueCache=null;this.pendingObservation=null;this.resolvedCache.clear();await this.closeDevice();}
 }
